@@ -428,13 +428,13 @@ namespace Mono.CSharp {
 		public TypeParameter (TypeParameterSpec spec, TypeSpec parentSpec, MemberName name, Attributes attrs)
 			: base (null, name, attrs)
 		{
-			this.spec = new TypeParameterSpec (parentSpec, spec.DeclaredPosition, spec.MemberDefinition, spec.SpecialConstraint, spec.Variance, null) {
+			this.spec = new TypeParameterSpec (parentSpec, spec.DeclaredPosition, this, spec.SpecialConstraint, spec.Variance, null) {
 				BaseType = spec.BaseType,
 				InterfacesDefined = spec.InterfacesDefined,
 				TypeArguments = spec.TypeArguments
 			};
 		}
-		
+
 		#region Properties
 
 		public override AttributeTargets AttributeTargets {
@@ -649,10 +649,10 @@ namespace Mono.CSharp {
 				var meta_constraints = new List<MetaType> (spec.TypeArguments.Length);
 				foreach (var c in spec.TypeArguments) {
 					//
-					// Inflated type parameters can collide with special constraint types, don't
+					// Inflated type parameters can collide with base type constraint, don't
 					// emit any such type parameter.
 					//
-					if (c.BuiltinType == BuiltinTypeSpec.Type.Object || c.BuiltinType == BuiltinTypeSpec.Type.ValueType)
+					if (c.IsClass && spec.BaseType.BuiltinType != BuiltinTypeSpec.Type.Object)
 						continue;
 
 					meta_constraints.Add (c.GetMetaInfo ());
@@ -773,6 +773,7 @@ namespace Mono.CSharp {
 		TypeSpec[] targs;
 		TypeSpec[] ifaces_defined;
 		TypeSpec effective_base;
+		MemberCache interface_cache;
 
 		//
 		// Creates type owned type parameter
@@ -879,6 +880,12 @@ namespace Mono.CSharp {
 				}
 
 				return ifaces;
+			}
+		}
+
+		public MemberCache InterfaceCache {
+			get {
+				return interface_cache;
 			}
 		}
 
@@ -1138,7 +1145,7 @@ namespace Mono.CSharp {
 				//
 				// Iterate over inflated interfaces
 				//
-				foreach (var iface in Interfaces) {
+				foreach (var iface in InterfacesDefined) {
 					found = false;
 					if (other.InterfacesDefined != null) {
 						foreach (var oiface in other.Interfaces) {
@@ -1171,7 +1178,7 @@ namespace Mono.CSharp {
 				//
 				// Iterate over inflated interfaces
 				//
-				foreach (var oiface in other.Interfaces) {
+				foreach (var oiface in other.InterfacesDefined) {
 					found = false;
 
 					if (InterfacesDefined != null) {
@@ -1334,42 +1341,64 @@ namespace Mono.CSharp {
 		{
 			cache = new MemberCache ();
 
+			if (targs != null) {
+				foreach (var ta in targs) {
+					var tps = ta as TypeParameterSpec;
+					var b_type = tps == null ? ta : tps.GetEffectiveBase ();
+
+					//
+					// Find the most specific type when base type was inflated from base constraints
+					//
+					if (b_type != null && !b_type.IsStructOrEnum && TypeSpec.IsBaseClass (b_type, BaseType, false))
+						BaseType = b_type;
+				}
+			}
+
 			//
 			// For a type parameter the membercache is the union of the sets of members of the types
 			// specified as a primary constraint or secondary constraint
 			//
-			if (BaseType.BuiltinType != BuiltinTypeSpec.Type.Object && BaseType.BuiltinType != BuiltinTypeSpec.Type.ValueType)
+			bool has_user_base_type = false;
+			if (BaseType.BuiltinType != BuiltinTypeSpec.Type.Object && BaseType.BuiltinType != BuiltinTypeSpec.Type.ValueType) {
 				cache.AddBaseType (BaseType);
+				has_user_base_type = true;
+			}
 
 			if (InterfacesDefined != null) {
+				var icache = cache;
+				if (has_user_base_type) {
+					//
+					// type-parameter lookup rules are more complicated that other types lookup rules.
+					// Effective base class and its base types member have priority over interface
+					// constraints which means we cannot lookup interface members before class members
+					// hence we setup secondary cache for such cases.
+					//
+					interface_cache = new MemberCache ();
+					icache = interface_cache;
+				}
+
 				foreach (var iface_type in InterfacesDefined) {
-					cache.AddInterface (iface_type);
+					icache.AddInterface (iface_type);
 				}
 			}
 
+			//
+			// Import interfaces after base type to match behavior from ordinary classes
+			//
 			if (targs != null) {
 				foreach (var ta in targs) {
 					var tps = ta as TypeParameterSpec;
-					IList<TypeSpec> ifaces;
-					TypeSpec b_type;
-					if (tps != null) {
-						b_type = tps.GetEffectiveBase ();
-						ifaces = tps.InterfacesDefined;
-					} else {
-						b_type = ta;
-						ifaces = ta.Interfaces;
-					}
-
-					//
-					// Don't add base type which was inflated from base constraints but it's not valid
-					// in C# context
-					//
-					if (b_type != null && b_type.BuiltinType != BuiltinTypeSpec.Type.Object && b_type.BuiltinType != BuiltinTypeSpec.Type.ValueType && !b_type.IsStructOrEnum)
-						cache.AddBaseType (b_type);
+					var ifaces = tps == null ? ta.Interfaces : tps.InterfacesDefined;
 
 					if (ifaces != null) {
+						var icache = cache;
+						if (has_user_base_type) {
+							interface_cache = new MemberCache ();
+							icache = interface_cache;
+						}
+
 						foreach (var iface_type in ifaces) {
-							cache.AddInterface (iface_type);
+							icache.AddInterface (iface_type);
 						}
 					}
 				}
@@ -1514,6 +1543,9 @@ namespace Mono.CSharp {
 					if (ec is PointerContainer)
 						return PointerContainer.MakeType (context.Module, et);
 
+					if (ec is ReferenceContainer)
+						return ReferenceContainer.MakeType (context.Module, et);
+					
 					throw new NotImplementedException ();
 				}
 
@@ -1549,7 +1581,7 @@ namespace Mono.CSharp {
 				// Parent was inflated, find the same type on inflated type
 				// to use same cache for nested types on same generic parent
 				//
-				type = MemberCache.FindNestedType (parent, type.Name, type.Arity);
+				type = MemberCache.FindNestedType (parent, type.Name, type.Arity, false);
 
 				//
 				// Handle the tricky case where parent shares local type arguments
@@ -1743,7 +1775,10 @@ namespace Mono.CSharp {
 			foreach (var arg in targs) {
 				if (arg.HasDynamicElement || arg.BuiltinType == BuiltinTypeSpec.Type.Dynamic) {
 					state |= StateFlags.HasDynamicElement;
-					break;
+				}
+
+				if (arg.HasNamedTupleElement) {
+					state |= StateFlags.HasNamedTupleElement;
 				}
 			}
 
@@ -1820,6 +1855,12 @@ namespace Mono.CSharp {
 		public override bool IsNullableType {
 			get {
 				return (open_type.state & StateFlags.InflatedNullableType) != 0;
+			}
+		}
+
+		public override bool IsTupleType {
+			get {
+				return (open_type.state & StateFlags.Tuple) != 0;
 			}
 		}
 
@@ -2133,6 +2174,10 @@ namespace Mono.CSharp {
 				return this;
 
 			var mutated = (InflatedTypeSpec) MemberwiseClone ();
+#if DEBUG
+			mutated.ID += 1000000;
+#endif
+
 			if (decl != DeclaringType) {
 				// Gets back MethodInfo in case of metaInfo was inflated
 				//mutated.info = MemberCache.GetMember<TypeSpec> (DeclaringType.GetDefinition (), this).info;
@@ -3058,7 +3103,11 @@ namespace Mono.CSharp {
 			// Some types cannot be used as type arguments
 			//
 			if ((bound.Type.Kind == MemberKind.Void && !voidAllowed) || bound.Type.IsPointer || bound.Type.IsSpecialRuntimeType ||
-				bound.Type == InternalType.MethodGroup || bound.Type == InternalType.AnonymousMethod || bound.Type == InternalType.VarOutType)
+			    bound.Type == InternalType.MethodGroup || bound.Type == InternalType.AnonymousMethod || bound.Type == InternalType.VarOutType ||
+			    bound.Type == InternalType.ThrowExpr)
+				return;
+
+			if (bound.Type.IsTupleType && TupleLiteral.ContainsNoTypeElement (bound.Type))
 				return;
 
 			var a = bounds [index];
@@ -3109,21 +3158,36 @@ namespace Mono.CSharp {
 				return ExactInference (ac_u.Element, ac_v.Element);
 			}
 
-			// If V is constructed type and U is constructed type
+			//
+			// If V is constructed type and U is constructed type or dynamic
+			//
 			if (TypeManager.IsGenericType (v)) {
-				if (!TypeManager.IsGenericType (u) || v.MemberDefinition != u.MemberDefinition)
-					return 0;
+				if (u.BuiltinType == BuiltinTypeSpec.Type.Dynamic) {
 
-				TypeSpec [] ga_u = TypeManager.GetTypeArguments (u);
-				TypeSpec [] ga_v = TypeManager.GetTypeArguments (v);
-				if (ga_u.Length != ga_v.Length)
-					return 0;
+					var ga_v = v.TypeArguments;
 
-				int score = 0;
-				for (int i = 0; i < ga_u.Length; ++i)
-					score += ExactInference (ga_u [i], ga_v [i]);
+					int score = 0;
+					for (int i = 0; i < ga_v.Length; ++i)
+						score += ExactInference (u, ga_v [i]);
 
-				return System.Math.Min (1, score);
+					return System.Math.Min (1, score);
+
+				} else {
+					if (!TypeManager.IsGenericType (u) || v.MemberDefinition != u.MemberDefinition)
+						return 0;
+
+					var ga_u = u.TypeArguments;
+					var ga_v = v.TypeArguments;
+
+					if (u.TypeArguments.Length != v.TypeArguments.Length)
+						return 0;
+
+					int score = 0;
+					for (int i = 0; i < ga_v.Length; ++i)
+						score += ExactInference (ga_u [i], ga_v [i]);
+
+					return System.Math.Min (1, score);
+				}
 			}
 
 			// If V is one of the unfixed type arguments

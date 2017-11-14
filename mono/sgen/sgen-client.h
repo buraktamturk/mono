@@ -1,20 +1,10 @@
-/*
- * sgen-client.h: SGen client interface.
+/**
+ * \file
+ * SGen client interface.
  *
  * Copyright (C) 2014 Xamarin Inc
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License 2.0 as published by the Free Software Foundation;
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
- *
- * You should have received a copy of the GNU Library General Public
- * License 2.0 along with this library; if not, write to the Free
- * Software Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * Licensed under the MIT license. See LICENSE file in the project root for full license information.
  */
 
 #include "mono/sgen/sgen-pointer-queue.h"
@@ -79,20 +69,35 @@ void sgen_client_finalize_notify (void);
  * Returns TRUE if no ephemerons have been marked.  Will be called again if it returned
  * FALSE.  If ephemerons are not supported, just return TRUE.
  */
-gboolean sgen_client_mark_ephemerons (ScanCopyContext ctx);
+gboolean sgen_client_mark_ephemerons (ScanCopyContext ctx)
+    MONO_PERMIT (need (sgen_gc_locked));
 
 /*
  * Clear ephemeron pairs with unreachable keys.
  * We pass the copy func so we can figure out if an array was promoted or not.
  */
-void sgen_client_clear_unreachable_ephemerons (ScanCopyContext ctx);
+void sgen_client_clear_unreachable_ephemerons (ScanCopyContext ctx)
+    MONO_PERMIT (need (sgen_gc_locked));
+
+/*
+ * May return NULL.  Must be an aligned pointer.
+ */
+gpointer sgen_client_default_metadata (void);
+gpointer sgen_client_metadata_for_object (GCObject *obj);
+
+/*
+ * No action required.
+ */
+void sgen_client_gchandle_created (int handle_type, GCObject *obj, guint32 handle);
+void sgen_client_gchandle_destroyed (int handle_type, guint32 handle);
+void sgen_client_ensure_weak_gchandles_accessible (void);
 
 /*
  * This is called for objects that are larger than one card.  If it's possible to scan only
  * parts of the object based on which cards are marked, do so and return TRUE.  Otherwise,
  * return FALSE.
  */
-gboolean sgen_client_cardtable_scan_object (GCObject *obj, mword block_obj_size, guint8 *cards, gboolean mod_union, ScanCopyContext ctx);
+gboolean sgen_client_cardtable_scan_object (GCObject *obj, guint8 *cards, ScanCopyContext ctx);
 
 /*
  * Called after nursery objects have been pinned.  No action is necessary.
@@ -119,21 +124,13 @@ void sgen_client_pinned_los_object (GCObject *obj);
 /*
  * Called for every degraded allocation.  No action is necessary.
  */
-void sgen_client_degraded_allocation (size_t size);
+void sgen_client_degraded_allocation (void);
 
 /*
  * Called whenever the amount of memory allocated for the managed heap changes.  No action
  * is necessary.
  */
 void sgen_client_total_allocated_heap_changed (size_t allocated_heap_size);
-
-/*
- * Called when an object allocation fails.  The suggested action is to abort the program.
- *
- * FIXME: Don't we want to return a BOOL here that indicates whether to retry the
- * allocation?
- */
-void sgen_client_out_of_memory (size_t size);
 
 /*
  * If the client has registered any internal memory types, this must return a string
@@ -158,11 +155,11 @@ void sgen_client_pre_collection_checks (void);
  * Must set the thread's thread info to `info`.  If the thread's small ID was not already
  * initialized in `sgen_client_init()` (for the main thread, usually), it must be done here.
  *
- * `stack_bottom_fallback` is the value passed through via `sgen_thread_register()`.
+ * `stack_bottom_fallback` is the value passed through via `sgen_thread_attach()`.
  */
-void sgen_client_thread_register (SgenThreadInfo* info, void *stack_bottom_fallback);
+void sgen_client_thread_attach (SgenThreadInfo* info);
 
-void sgen_client_thread_unregister (SgenThreadInfo *p);
+void sgen_client_thread_detach_with_lock (SgenThreadInfo *p);
 
 /*
  * Called on each worker thread when it starts up.  Must initialize the thread's small ID.
@@ -179,8 +176,10 @@ void sgen_client_scan_thread_data (void *start_nursery, void *end_nursery, gbool
  * Stop and restart the world, i.e., all threads that interact with the managed heap.  For
  * single-threaded programs this is a nop.
  */
-void sgen_client_stop_world (int generation);
-void sgen_client_restart_world (int generation, GGTimingInfo *timing);
+void sgen_client_stop_world (int generation)
+    MONO_PERMIT (need (sgen_gc_locked));
+void sgen_client_restart_world (int generation, gint64 *stw_time)
+    MONO_PERMIT (need (sgen_gc_locked));
 
 /*
  * Must return FALSE.  The bridge is not supported outside of Mono.
@@ -202,12 +201,6 @@ void sgen_client_bridge_register_finalized_object (GCObject *object);
  */
 void sgen_client_mark_togglerefs (char *start, char *end, ScanCopyContext ctx);
 void sgen_client_clear_togglerefs (char *start, char *end, ScanCopyContext ctx);
-
-/*
- * Called after collections, reporting the amount of time they took.  No action is
- * necessary.
- */
-void sgen_client_log_timing (GGTimingInfo *info, mword last_major_num_sections, mword last_los_memory_usage);
 
 /*
  * Called to handle `MONO_GC_PARAMS` and `MONO_GC_DEBUG` options.  The `handle` functions

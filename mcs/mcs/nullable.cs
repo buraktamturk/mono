@@ -695,6 +695,20 @@ namespace Mono.CSharp.Nullable
 					Right = Unwrap.CreateUnwrapped (Right);
 					UnwrapRight = Right as Unwrap;
 				}
+
+				if (Left.Type.BuiltinType == BuiltinTypeSpec.Type.Decimal) {
+					var decimal_operators = MemberCache.GetUserOperator (Left.Type, Binary.ConvertBinaryToUserOperator (Binary.Oper), false);
+
+					Arguments args = new Arguments (2);
+					args.Add (new Argument (Left));
+					args.Add (new Argument (Right));
+
+					const OverloadResolver.Restrictions restr = OverloadResolver.Restrictions.ProbingOnly |
+						OverloadResolver.Restrictions.NoBaseMembers | OverloadResolver.Restrictions.BaseMembersIncluded;
+
+					var res = new OverloadResolver (decimal_operators, restr, loc);
+					UserOperator = res.ResolveOperator (rc, ref args);
+				}
 			}
 
 			type = Binary.Type;
@@ -795,7 +809,7 @@ namespace Mono.CSharp.Nullable
 			//
 			// Both operands are bool? types
 			//
-			if (UnwrapLeft != null && UnwrapRight != null) {
+			if ((UnwrapLeft != null && !Left.IsNull) && (UnwrapRight != null && !Right.IsNull)) {
 				if (ec.HasSet (BuilderContext.Options.AsyncBody) && Binary.Right.ContainsEmitWithAwait ()) {
 					Left = Left.EmitToField (ec);
 					Right = Right.EmitToField (ec);
@@ -861,6 +875,8 @@ namespace Mono.CSharp.Nullable
 					LiftedNull.Create (type, loc).Emit (ec);
 				} else {
 					Left.Emit (ec);
+					UnwrapRight.Store (ec);
+
 					ec.Emit (or ? OpCodes.Brfalse_S : OpCodes.Brtrue_S, load_right);
 
 					ec.EmitInt (or ? 1 : 0);
@@ -869,7 +885,7 @@ namespace Mono.CSharp.Nullable
 					ec.Emit (OpCodes.Br_S, end_label);
 
 					ec.MarkLabel (load_right);
-					UnwrapRight.Original.Emit (ec);
+					UnwrapRight.Load (ec);
 				}
 			} else {
 				//
@@ -895,16 +911,28 @@ namespace Mono.CSharp.Nullable
 
 					ec.MarkLabel (is_null_label);
 					LiftedNull.Create (type, loc).Emit (ec);
+				} else if (Left.IsNull && UnwrapRight != null) {
+					UnwrapRight.Emit (ec);
+
+					ec.Emit (or ? OpCodes.Brtrue_S : OpCodes.Brfalse_S, load_right);
+
+					LiftedNull.Create (type, loc).Emit (ec);
+
+					ec.Emit (OpCodes.Br_S, end_label);
+
+					ec.MarkLabel (load_right);
+
+					UnwrapRight.Load (ec);
 				} else {
 					Right.Emit (ec);
-					ec.Emit (or ? OpCodes.Brfalse_S : OpCodes.Brtrue_S, load_right);
+					ec.Emit (or ? OpCodes.Brfalse_S : OpCodes.Brtrue_S, load_left);
 
 					ec.EmitInt (or ? 1 : 0);
 					ec.Emit (OpCodes.Newobj, NullableInfo.GetConstructor (type));
 
 					ec.Emit (OpCodes.Br_S, end_label);
 
-					ec.MarkLabel (load_right);
+					ec.MarkLabel (load_left);
 
 					UnwrapLeft.Load (ec);
 				}
@@ -1073,6 +1101,7 @@ namespace Mono.CSharp.Nullable
 	{
 		Expression left, right;
 		Unwrap unwrap;
+		bool user_conversion_left;
 
 		public NullCoalescingOperator (Expression left, Expression right)
 		{
@@ -1195,7 +1224,7 @@ namespace Mono.CSharp.Nullable
 						//
 						// Special case null ?? null
 						//
-						if (right.IsNull && ltype == right.Type)
+						if (right is NullLiteral && ltype == right.Type)
 							return null;
 
 						return ReducedExpression.Create (lc != null ? right : left, this, false);
@@ -1205,6 +1234,11 @@ namespace Mono.CSharp.Nullable
 					type = ltype;
 					return this;
 				}
+			} else if (ltype == InternalType.ThrowExpr) {
+				//
+				// LAMESPEC: I am not really sure what's point of allowing throw on left side
+				//
+				return ReducedExpression.Create (right, this, false).Resolve (ec);
 			} else {
 				return null;
 			}
@@ -1220,6 +1254,7 @@ namespace Mono.CSharp.Nullable
 				return ReducedExpression.Create (right, this, false).Resolve (ec);
 
 			left = Convert.ImplicitConversion (ec, unwrap ?? left, rtype, loc);
+			user_conversion_left = left is UserCast;
 			type = rtype;
 			return this;
 		}
@@ -1282,11 +1317,15 @@ namespace Mono.CSharp.Nullable
 			//
 			// Null check is done on original expression not after expression is converted to
 			// result type. This is in most cases same but when user conversion is involved
-			// we can end up in situation when use operator does the null handling which is
-			// not what the operator is supposed to do
+			// we can end up in situation when user operator does the null handling which is
+			// not what the operator is supposed to do.
+			// There is tricky case where cast of left expression is meant to be cast of
+			// whole source expression (null check is done on it) and cast from right-to-left
+			// conversion needs to do null check on unconverted source expression.
 			//
-			var op_expr = left as UserCast;
-			if (op_expr != null) {
+			if (user_conversion_left) {
+				var op_expr = (UserCast) left;
+
 				op_expr.Source.Emit (ec);
 				LocalTemporary temp;
 

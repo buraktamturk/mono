@@ -270,6 +270,26 @@ namespace MonoTests.Mono.Options
 		}
 
 		[Test]
+		public void EnumValues ()
+		{
+			DayOfWeek a = 0;
+			OptionSet p = new OptionSet () {
+				{ "a=", (DayOfWeek v) => a = v },
+			};
+			p.Parse (_ ("-a=Monday"));
+			Assert.AreEqual (a, DayOfWeek.Monday);
+			p.Parse (_ ("-a=tuesday"));
+			Assert.AreEqual (a, DayOfWeek.Tuesday);
+			p.Parse (_ ("-a=3"));
+			Assert.AreEqual (a, DayOfWeek.Wednesday);
+			p.Parse (_ ("-a=Monday,Tuesday"));
+			Assert.AreEqual (a, DayOfWeek.Monday | DayOfWeek.Tuesday);
+			Utils.AssertException (typeof (OptionException),
+					"Could not convert string `Noday' to type DayOfWeek for option `-a'.",
+					p, v => { v.Parse (_ ("-a=Noday")); });
+		}
+
+		[Test]
 		public void BooleanValues ()
 		{
 			bool a = false;
@@ -354,10 +374,10 @@ namespace MonoTests.Mono.Options
 					p, v => { v.Parse (_("-a", "-b")); });
 			Assert.AreEqual (a, "-b");
 			Utils.AssertException (typeof(ArgumentNullException),
-					"Value cannot be null.\nParameter name: option",
+					$"Value cannot be null.{Environment.NewLine}Parameter name: option",
 					p, v => { v.Add ((Option) null); });
 			Utils.AssertException (typeof(ArgumentNullException),
-					"Value cannot be null.\nParameter name: header",
+					$"Value cannot be null.{Environment.NewLine}Parameter name: header",
 					p, v => { v.Add ((string) null); });
 
 			// bad type
@@ -374,10 +394,10 @@ namespace MonoTests.Mono.Options
 					p, v => { v.Parse (_("-cz", "extra")); });
 
 			Utils.AssertException (typeof(ArgumentNullException), 
-					"Value cannot be null.\nParameter name: action",
+					$"Value cannot be null.{Environment.NewLine}Parameter name: action",
 					p, v => { v.Add ("foo", (Action<string>) null); });
 			Utils.AssertException (typeof(ArgumentException), 
-					"Cannot provide maxValueCount of 2 for OptionValueType.None.\nParameter name: maxValueCount",
+					$"Cannot provide maxValueCount of 2 for OptionValueType.None.{Environment.NewLine}Parameter name: maxValueCount",
 					p, v => { v.Add ("foo", (k, val) => {/* ignore */}); });
 		}
 
@@ -752,7 +772,7 @@ namespace MonoTests.Mono.Options
 			Utils.AssertException (typeof(ArgumentException), "prototypes must be null!",
 					p, v => { v.Add ("N|NUM=", (int n) => {}); });
 			Utils.AssertException (typeof(ArgumentNullException),
-					"Value cannot be null.\nParameter name: option",
+					$"Value cannot be null.{Environment.NewLine}Parameter name: option",
 					p, v => { v.GetOptionForName (null); });
 		}
 

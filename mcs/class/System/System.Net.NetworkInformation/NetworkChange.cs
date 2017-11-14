@@ -101,6 +101,9 @@ namespace System.Net.NetworkInformation {
 
 		static void MaybeCreate ()
 		{
+#if MONOTOUCH_WATCH || ORBIS
+			throw new PlatformNotSupportedException ("NetworkInformation.NetworkChange is not supported on the current platform.");
+#else
 			if (networkChange != null)
 				return;
 
@@ -111,6 +114,7 @@ namespace System.Net.NetworkInformation {
 				networkChange = new LinuxNetworkChange ();
 #endif
 			}
+#endif // MONOTOUCH_WATCH
 		}
 
 		static void MaybeDispose ()
@@ -122,6 +126,7 @@ namespace System.Net.NetworkInformation {
 		}
 	}
 
+#if !MONOTOUCH_WATCH && !ORBIS
 	internal sealed class MacNetworkChange : INetworkChange
 	{
 		const string DL_LIB = "/usr/lib/libSystem.dylib";
@@ -294,9 +299,7 @@ namespace System.Net.NetworkInformation {
 			}
 		}
 
-#if MONOTOUCH
-		[MonoTouch.MonoPInvokeCallback (typeof (SCNetworkReachabilityCallback))]
-#endif
+		[Mono.Util.MonoPInvokeCallback (typeof (SCNetworkReachabilityCallback))]
 		static void HandleCallback (IntPtr reachability, NetworkReachabilityFlags flags, IntPtr info)
 		{
 			if (info == IntPtr.Zero)
@@ -317,8 +320,9 @@ namespace System.Net.NetworkInformation {
 				availabilityChanged (null, new NetworkAvailabilityEventArgs (instance.IsAvailable));
 		}
 	}
+#endif // !MONOTOUCH_WATCH
 
-#if !NETWORK_CHANGE_STANDALONE && !MONOTOUCH
+#if !NETWORK_CHANGE_STANDALONE && !MONOTOUCH && !ORBIS
 
 	internal sealed class LinuxNetworkChange : INetworkChange {
 		[Flags]
@@ -442,8 +446,10 @@ namespace System.Net.NetworkInformation {
 
 		unsafe void OnDataAvailable (object sender, SocketAsyncEventArgs args)
 		{
+			if (nl_sock == null) // Recent changes in Mono cause MaybeCloseSocket to be called before OnDataAvailable
+				return;
 			EventType type;
-			fixed (byte *ptr = args.Buffer) {	
+			fixed (byte *ptr = args.Buffer) {
 				type = ReadEvents (nl_sock.Handle, new IntPtr (ptr), args.BytesTransferred, 8192);
 			}
 			nl_sock.ReceiveAsync (nl_args);

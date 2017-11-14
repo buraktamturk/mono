@@ -1,5 +1,6 @@
-/*
- * sgen-fin-weak-hash.c: Finalizers and weak links.
+/**
+ * \file
+ * Finalizers and weak links.
  *
  * Author:
  * 	Paolo Molaro (lupus@ximian.com)
@@ -10,18 +11,7 @@
  * Copyright 2011 Xamarin, Inc.
  * Copyright (C) 2012 Xamarin Inc
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License 2.0 as published by the Free Software Foundation;
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
- *
- * You should have received a copy of the GNU Library General Public
- * License 2.0 along with this library; if not, write to the Free
- * Software Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * Licensed under the MIT license. See LICENSE file in the project root for full license information.
  */
 
 #include "config.h"
@@ -32,16 +22,16 @@
 #include "mono/sgen/sgen-protocol.h"
 #include "mono/sgen/sgen-pointer-queue.h"
 #include "mono/sgen/sgen-client.h"
+#include "mono/sgen/gc-internal-agnostic.h"
 #include "mono/utils/mono-membar.h"
+#include "mono/utils/atomic.h"
+#include "mono/utils/unlocked.h"
 
 #define ptr_in_nursery sgen_ptr_in_nursery
 
 typedef SgenGrayQueue GrayQueue;
 
 static int no_finalize = 0;
-
-#define DISLINK_OBJECT(l)	(REVEAL_POINTER (*(void**)(l)))
-#define DISLINK_TRACK(l)	((~(size_t)(*(void**)(l))) & 1)
 
 /*
  * The finalizable hash has the object as the key, the 
@@ -123,7 +113,7 @@ sgen_collect_bridge_objects (int generation, ScanCopyContext ctx)
 	if (no_finalize)
 		return;
 
-	SGEN_HASH_TABLE_FOREACH (hash_table, object, dummy) {
+	SGEN_HASH_TABLE_FOREACH (hash_table, GCObject *, object, gpointer, dummy) {
 		int tag = tagged_object_get_tag (object);
 		object = tagged_object_get_object (object);
 
@@ -193,7 +183,7 @@ sgen_finalize_in_range (int generation, ScanCopyContext ctx)
 
 	if (no_finalize)
 		return;
-	SGEN_HASH_TABLE_FOREACH (hash_table, object, dummy) {
+	SGEN_HASH_TABLE_FOREACH (hash_table, GCObject *, object, gpointer, dummy) {
 		int tag = tagged_object_get_tag (object);
 		object = tagged_object_get_object (object);
 		if (!major_collector.is_object_live (object)) {
@@ -241,7 +231,7 @@ sgen_finalize_in_range (int generation, ScanCopyContext ctx)
 }
 
 /* LOCKING: requires that the GC lock is held */
-static void
+static MONO_PERMIT (need (sgen_gc_locked)) void
 register_for_finalization (GCObject *obj, void *user_data, int generation)
 {
 	SgenHashTable *hash_table = get_finalize_entry_hash_table (generation);
@@ -354,11 +344,11 @@ try_lock_stage_for_processing (int num_entries, volatile gint32 *next_entry)
 	gint32 old = *next_entry;
 	if (old < num_entries)
 		return FALSE;
-	return InterlockedCompareExchange (next_entry, -1, old) == old;
+	return mono_atomic_cas_i32 (next_entry, -1, old) == old;
 }
 
 /* LOCKING: requires that the GC lock is held */
-static void
+static MONO_PERMIT (need (sgen_gc_locked)) void
 process_stage_entries (int num_entries, volatile gint32 *next_entry, StageEntry *entries, void (*process_func) (GCObject*, void*, int))
 {
 	int i;
@@ -390,7 +380,7 @@ process_stage_entries (int num_entries, volatile gint32 *next_entry, StageEntry 
 			 * the entry to `USED`, in which case we must process it, so we must
 			 * detect that eventuality.
 			 */
-			if (InterlockedCompareExchange (&entries [i].state, STAGE_ENTRY_INVALID, STAGE_ENTRY_BUSY) != STAGE_ENTRY_BUSY)
+			if (mono_atomic_cas_i32 (&entries [i].state, STAGE_ENTRY_INVALID, STAGE_ENTRY_BUSY) != STAGE_ENTRY_BUSY)
 				goto retry;
 			continue;
 		case STAGE_ENTRY_USED:
@@ -422,12 +412,12 @@ process_stage_entries (int num_entries, volatile gint32 *next_entry, StageEntry 
 }
 
 #ifdef HEAVY_STATISTICS
-static guint64 stat_overflow_abort = 0;
-static guint64 stat_wait_for_processing = 0;
-static guint64 stat_increment_other_thread = 0;
-static guint64 stat_index_decremented = 0;
-static guint64 stat_entry_invalidated = 0;
-static guint64 stat_success = 0;
+static gint64 stat_success = 0;
+static gint64 stat_overflow_abort = 0;
+static gint64 stat_wait_for_processing = 0;
+static gint64 stat_increment_other_thread = 0;
+static gint64 stat_index_decremented = 0;
+static gint64 stat_entry_invalidated = 0;
 #endif
 
 static int
@@ -438,9 +428,9 @@ add_stage_entry (int num_entries, volatile gint32 *next_entry, StageEntry *entri
 
  retry:
 	for (;;) {
-		index = *next_entry;
+		index = UnlockedRead (next_entry);
 		if (index >= num_entries) {
-			HEAVY_STAT (++stat_overflow_abort);
+			HEAVY_STAT (UnlockedIncrement64 (&stat_overflow_abort));
 			return -1;
 		}
 		if (index < 0) {
@@ -448,29 +438,29 @@ add_stage_entry (int num_entries, volatile gint32 *next_entry, StageEntry *entri
 			 * Backed-off waiting is way more efficient than even using a
 			 * dedicated lock for this.
 			 */
-			while ((index = *next_entry) < 0) {
+			while ((index = UnlockedRead (next_entry)) < 0) {
 				/*
 				 * This seems like a good value.  Determined by timing
 				 * sgen-weakref-stress.exe.
 				 */
-				g_usleep (200);
-				HEAVY_STAT (++stat_wait_for_processing);
+				mono_thread_info_usleep (200);
+				HEAVY_STAT (UnlockedIncrement64 (&stat_wait_for_processing));
 			}
 			continue;
 		}
 		/* FREE -> BUSY */
-		if (entries [index].state != STAGE_ENTRY_FREE ||
-				InterlockedCompareExchange (&entries [index].state, STAGE_ENTRY_BUSY, STAGE_ENTRY_FREE) != STAGE_ENTRY_FREE) {
+		if (UnlockedRead (&entries [index].state) != STAGE_ENTRY_FREE ||
+				mono_atomic_cas_i32 (&entries [index].state, STAGE_ENTRY_BUSY, STAGE_ENTRY_FREE) != STAGE_ENTRY_FREE) {
 			/*
 			 * If we can't get the entry it must be because another thread got
 			 * it first.  We don't want to wait for that thread to increment
 			 * `next_entry`, so we try to do it ourselves.  Whether we succeed
 			 * or not, we start over.
 			 */
-			if (*next_entry == index) {
-				InterlockedCompareExchange (next_entry, index + 1, index);
+			if (UnlockedRead (next_entry) == index) {
+				mono_atomic_cas_i32 (next_entry, index + 1, index);
 				//g_print ("tried increment for other thread\n");
-				HEAVY_STAT (++stat_increment_other_thread);
+				HEAVY_STAT (UnlockedIncrement64 (&stat_increment_other_thread));
 			}
 			continue;
 		}
@@ -489,7 +479,7 @@ add_stage_entry (int num_entries, volatile gint32 *next_entry, StageEntry *entri
 		 * sets it to `-1`, that also takes care of the case that the drainer is
 		 * currently running.
 		 */
-		old_next_entry = InterlockedCompareExchange (next_entry, index + 1, index);
+		old_next_entry = mono_atomic_cas_i32 (next_entry, index + 1, index);
 		if (old_next_entry < index) {
 			/* BUSY -> FREE */
 			/* INVALID -> FREE */
@@ -498,8 +488,8 @@ add_stage_entry (int num_entries, volatile gint32 *next_entry, StageEntry *entri
 			 * to `INVALID`.  In either case, there's no point in CASing.  Set
 			 * it to `FREE` and start over.
 			 */
-			entries [index].state = STAGE_ENTRY_FREE;
-			HEAVY_STAT (++stat_index_decremented);
+			UnlockedWrite (&entries [index].state, STAGE_ENTRY_FREE);
+			HEAVY_STAT (UnlockedIncrement64 (&stat_index_decremented));
 			continue;
 		}
 		break;
@@ -507,12 +497,12 @@ add_stage_entry (int num_entries, volatile gint32 *next_entry, StageEntry *entri
 
 	SGEN_ASSERT (0, index >= 0 && index < num_entries, "Invalid index");
 
-	entries [index].obj = obj;
-	entries [index].user_data = user_data;
+	UnlockedWritePointer ((void *)&entries [index].obj, obj);
+	UnlockedWritePointer (&entries [index].user_data, user_data);
 
 	mono_memory_write_barrier ();
 
-	new_next_entry = *next_entry;
+	new_next_entry = UnlockedRead (next_entry);
 	mono_memory_read_barrier ();
 	/* BUSY -> USED */
 	/*
@@ -520,27 +510,27 @@ add_stage_entry (int num_entries, volatile gint32 *next_entry, StageEntry *entri
 	 * `INVALID`.  In the former case, we set it to `USED` and we're finished.  In the
 	 * latter case, we reset it to `FREE` and start over.
 	 */
-	previous_state = InterlockedCompareExchange (&entries [index].state, STAGE_ENTRY_USED, STAGE_ENTRY_BUSY);
+	previous_state = mono_atomic_cas_i32 (&entries [index].state, STAGE_ENTRY_USED, STAGE_ENTRY_BUSY);
 	if (previous_state == STAGE_ENTRY_BUSY) {
 		SGEN_ASSERT (0, new_next_entry >= index || new_next_entry < 0, "Invalid next entry index - as long as we're busy, other thread can only increment or invalidate it");
-		HEAVY_STAT (++stat_success);
+		HEAVY_STAT (UnlockedIncrement64 (&stat_success));
 		return index;
 	}
 
 	SGEN_ASSERT (0, previous_state == STAGE_ENTRY_INVALID, "Invalid state transition - other thread can only make busy state invalid");
-	entries [index].obj = NULL;
-	entries [index].user_data = NULL;
+	UnlockedWritePointer ((void *)&entries [index].obj, NULL);
+	UnlockedWritePointer (&entries [index].user_data, NULL);
 	mono_memory_write_barrier ();
 	/* INVALID -> FREE */
-	entries [index].state = STAGE_ENTRY_FREE;
+	UnlockedWrite (&entries [index].state, STAGE_ENTRY_FREE);
 
-	HEAVY_STAT (++stat_entry_invalidated);
+	HEAVY_STAT (UnlockedIncrement64 (&stat_entry_invalidated));
 
 	goto retry;
 }
 
 /* LOCKING: requires that the GC lock is held */
-static void
+static MONO_PERMIT (need (sgen_gc_locked)) void
 process_fin_stage_entry (GCObject *obj, void *user_data, int index)
 {
 	if (ptr_in_nursery (obj))
@@ -570,30 +560,27 @@ sgen_object_register_for_finalization (GCObject *obj, void *user_data)
 }
 
 /* LOCKING: requires that the GC lock is held */
-static int
-finalizers_with_predicate (SgenObjectPredicateFunc predicate, void *user_data, GCObject **out_array, int out_size, SgenHashTable *hash_table)
+static MONO_PERMIT (need (sgen_gc_locked)) void
+finalize_with_predicate (SgenObjectPredicateFunc predicate, void *user_data, SgenHashTable *hash_table)
 {
 	GCObject *object;
 	gpointer dummy G_GNUC_UNUSED;
-	int count;
 
-	if (no_finalize || !out_size || !out_array)
-		return 0;
-	count = 0;
-	SGEN_HASH_TABLE_FOREACH (hash_table, object, dummy) {
+	if (no_finalize)
+		return;
+	SGEN_HASH_TABLE_FOREACH (hash_table, GCObject *, object, gpointer, dummy) {
 		object = tagged_object_get_object (object);
 
 		if (predicate (object, user_data)) {
 			/* remove and put in out_array */
 			SGEN_HASH_TABLE_FOREACH_REMOVE (TRUE);
-			out_array [count ++] = object;
-			SGEN_LOG (5, "Collecting object for finalization: %p (%s) (%d)", object, sgen_client_vtable_get_name (SGEN_LOAD_VTABLE (object)), sgen_hash_table_num_entries (hash_table));
-			if (count == out_size)
-				return count;
-			continue;
+			sgen_queue_finalization_entry (object);
+			SGEN_LOG (5, "Enqueuing object for finalization: %p (%s) (%d)", object, sgen_client_vtable_get_name (SGEN_LOAD_VTABLE (object)), sgen_hash_table_num_entries (hash_table));
 		}
+
+		if (sgen_suspend_finalizers)
+			break;
 	} SGEN_HASH_TABLE_FOREACH_END;
-	return count;
 }
 
 /**
@@ -612,164 +599,14 @@ finalizers_with_predicate (SgenObjectPredicateFunc predicate, void *user_data, G
  * @out_array me be on the stack, or registered as a root, to allow the GC to know the
  * objects are still alive.
  */
-int
-sgen_gather_finalizers_if (SgenObjectPredicateFunc predicate, void *user_data, GCObject **out_array, int out_size)
+void
+sgen_finalize_if (SgenObjectPredicateFunc predicate, void *user_data)
 {
-	int result;
-
 	LOCK_GC;
 	sgen_process_fin_stage_entries ();
-	result = finalizers_with_predicate (predicate, user_data, (GCObject**)out_array, out_size, &minor_finalizable_hash);
-	if (result < out_size) {
-		result += finalizers_with_predicate (predicate, user_data, (GCObject**)out_array + result, out_size - result,
-			&major_finalizable_hash);
-	}
+	finalize_with_predicate (predicate, user_data, &minor_finalizable_hash);
+	finalize_with_predicate (predicate, user_data, &major_finalizable_hash);
 	UNLOCK_GC;
-
-	return result;
-}
-
-static SgenHashTable minor_disappearing_link_hash = SGEN_HASH_TABLE_INIT (INTERNAL_MEM_DISLINK_TABLE, INTERNAL_MEM_DISLINK, 0, sgen_aligned_addr_hash, NULL);
-static SgenHashTable major_disappearing_link_hash = SGEN_HASH_TABLE_INIT (INTERNAL_MEM_DISLINK_TABLE, INTERNAL_MEM_DISLINK, 0, sgen_aligned_addr_hash, NULL);
-
-static SgenHashTable*
-get_dislink_hash_table (int generation)
-{
-	switch (generation) {
-	case GENERATION_NURSERY: return &minor_disappearing_link_hash;
-	case GENERATION_OLD: return &major_disappearing_link_hash;
-	default: g_assert_not_reached ();
-	}
-}
-
-/* LOCKING: assumes the GC lock is held */
-static void
-add_or_remove_disappearing_link (GCObject *obj, void **link, int generation)
-{
-	SgenHashTable *hash_table = get_dislink_hash_table (generation);
-
-	if (!obj) {
-		if (sgen_hash_table_remove (hash_table, link, NULL)) {
-			SGEN_LOG (5, "Removed dislink %p (%d) from %s table",
-					link, hash_table->num_entries, sgen_generation_name (generation));
-		}
-		return;
-	}
-
-	sgen_hash_table_replace (hash_table, link, NULL, NULL);
-	SGEN_LOG (5, "Added dislink for object: %p (%s) at %p to %s table",
-			obj, sgen_client_vtable_get_name (SGEN_LOAD_VTABLE_UNCHECKED (obj)), link, sgen_generation_name (generation));
-}
-
-/* LOCKING: requires that the GC lock is held */
-void
-sgen_null_link_in_range (int generation, gboolean before_finalization, ScanCopyContext ctx)
-{
-	CopyOrMarkObjectFunc copy_func = ctx.ops->copy_or_mark_object;
-	GrayQueue *queue = ctx.queue;
-	void **link;
-	gpointer dummy G_GNUC_UNUSED;
-	SgenHashTable *hash = get_dislink_hash_table (generation);
-
-	SGEN_HASH_TABLE_FOREACH (hash, link, dummy) {
-		GCObject *object;
-		gboolean track;
-
-		/*
-		We null a weak link before unregistering it, so it's possible that a thread is
-		suspended right in between setting the content to null and staging the unregister.
-
-		The rest of this code cannot handle null links as DISLINK_OBJECT (NULL) produces an invalid address.
-
-		We should simply skip the entry as the staged removal will take place during the next GC.
-		*/
-		if (!*link) {
-			SGEN_LOG (5, "Dislink %p was externally nullified", link);
-			continue;
-		}
-
-		track = DISLINK_TRACK (link);
-		/*
-		 * Tracked references are processed after
-		 * finalization handling whereas standard weak
-		 * references are processed before.  If an
-		 * object is still not marked after finalization
-		 * handling it means that it either doesn't have
-		 * a finalizer or the finalizer has already run,
-		 * so we must null a tracking reference.
-		 */
-		if (track != before_finalization) {
-			object = DISLINK_OBJECT (link);
-			/*
-			We should guard against a null object been hidden. This can sometimes happen.
-			*/
-			if (!object) {
-				SGEN_LOG (5, "Dislink %p with a hidden null object", link);
-				continue;
-			}
-
-			if (!major_collector.is_object_live (object)) {
-				if (sgen_gc_is_object_ready_for_finalization (object)) {
-					*link = NULL;
-					binary_protocol_dislink_update (link, NULL, 0, 0);
-					SGEN_LOG (5, "Dislink nullified at %p to GCed object %p", link, object);
-					SGEN_HASH_TABLE_FOREACH_REMOVE (TRUE);
-					continue;
-				} else {
-					GCObject *copy = object;
-					copy_func (&copy, queue);
-
-					/* Update pointer if it's moved.  If the object
-					 * has been moved out of the nursery, we need to
-					 * remove the link from the minor hash table to
-					 * the major one.
-					 *
-					 * FIXME: what if an object is moved earlier?
-					 */
-
-					if (hash == &minor_disappearing_link_hash && !ptr_in_nursery (copy)) {
-						SGEN_HASH_TABLE_FOREACH_REMOVE (TRUE);
-
-						g_assert (copy);
-						*link = HIDE_POINTER (copy, track);
-						add_or_remove_disappearing_link (copy, link, GENERATION_OLD);
-						binary_protocol_dislink_update (link, copy, track, 0);
-
-						SGEN_LOG (5, "Upgraded dislink at %p to major because object %p moved to %p", link, object, copy);
-
-						continue;
-					} else {
-						*link = HIDE_POINTER (copy, track);
-						binary_protocol_dislink_update (link, copy, track, 0);
-						SGEN_LOG (5, "Updated dislink at %p to %p", link, DISLINK_OBJECT (link));
-					}
-				}
-			}
-		}
-	} SGEN_HASH_TABLE_FOREACH_END;
-}
-
-/* LOCKING: requires that the GC lock is held */
-void
-sgen_null_links_if (SgenObjectPredicateFunc predicate, void *data, int generation)
-{
-	void **link;
-	gpointer dummy G_GNUC_UNUSED;
-	SgenHashTable *hash = get_dislink_hash_table (generation);
-	SGEN_HASH_TABLE_FOREACH (hash, link, dummy) {
-		char *object = DISLINK_OBJECT (link);
-
-		if (!*link)
-			continue;
-
-		if (predicate ((GCObject*)object, data)) {
-			*link = NULL;
-			binary_protocol_dislink_update (link, NULL, 0, 0);
-			SGEN_LOG (5, "Dislink nullified by predicate at %p to GCed object %p", link, object);
-			SGEN_HASH_TABLE_FOREACH_REMOVE (FALSE /* TRUE */);
-			continue;
-		}
-	} SGEN_HASH_TABLE_FOREACH_END;
 }
 
 void
@@ -779,7 +616,7 @@ sgen_remove_finalizers_if (SgenObjectPredicateFunc predicate, void *user_data, i
 	GCObject *object;
 	gpointer dummy G_GNUC_UNUSED;
 
-	SGEN_HASH_TABLE_FOREACH (hash_table, object, dummy) {
+	SGEN_HASH_TABLE_FOREACH (hash_table, GCObject *, object, gpointer, dummy) {
 		object = tagged_object_get_object (object);
 
 		if (predicate (object, user_data)) {
@@ -789,82 +626,16 @@ sgen_remove_finalizers_if (SgenObjectPredicateFunc predicate, void *user_data, i
 	} SGEN_HASH_TABLE_FOREACH_END;	
 }
 
-/* LOCKING: requires that the GC lock is held */
-static void
-process_dislink_stage_entry (GCObject *obj, void *_link, int index)
-{
-	void **link = _link;
-
-	if (index >= 0)
-		binary_protocol_dislink_process_staged (link, obj, index);
-
-	add_or_remove_disappearing_link (NULL, link, GENERATION_NURSERY);
-	add_or_remove_disappearing_link (NULL, link, GENERATION_OLD);
-	if (obj) {
-		if (ptr_in_nursery (obj))
-			add_or_remove_disappearing_link (obj, link, GENERATION_NURSERY);
-		else
-			add_or_remove_disappearing_link (obj, link, GENERATION_OLD);
-	}
-}
-
-#define NUM_DISLINK_STAGE_ENTRIES	1024
-
-static volatile gint32 next_dislink_stage_entry = 0;
-static StageEntry dislink_stage_entries [NUM_DISLINK_STAGE_ENTRIES];
-
-/* LOCKING: requires that the GC lock is held */
-void
-sgen_process_dislink_stage_entries (void)
-{
-	lock_stage_for_processing (&next_dislink_stage_entry);
-	process_stage_entries (NUM_DISLINK_STAGE_ENTRIES, &next_dislink_stage_entry, dislink_stage_entries, process_dislink_stage_entry);
-}
-
-void
-sgen_register_disappearing_link (GCObject *obj, void **link, gboolean track, gboolean in_gc)
-{
-	if (obj)
-		*link = HIDE_POINTER (obj, track);
-	else
-		*link = NULL;
-
-#if 1
-	if (in_gc) {
-		binary_protocol_dislink_update (link, obj, track, 0);
-		process_dislink_stage_entry (obj, link, -1);
-	} else {
-		int index;
-		binary_protocol_dislink_update (link, obj, track, 1);
-		while ((index = add_stage_entry (NUM_DISLINK_STAGE_ENTRIES, &next_dislink_stage_entry, dislink_stage_entries, obj, link)) == -1) {
-			if (try_lock_stage_for_processing (NUM_DISLINK_STAGE_ENTRIES, &next_dislink_stage_entry)) {
-				LOCK_GC;
-				process_stage_entries (NUM_DISLINK_STAGE_ENTRIES, &next_dislink_stage_entry, dislink_stage_entries, process_dislink_stage_entry);
-				UNLOCK_GC;
-			}
-		}
-		binary_protocol_dislink_update_staged (link, obj, track, index);
-	}
-#else
-	if (!in_gc)
-		LOCK_GC;
-	binary_protocol_dislink_update (link, obj, track, 0);
-	process_dislink_stage_entry (obj, link, -1);
-	if (!in_gc)
-		UNLOCK_GC;
-#endif
-}
-
 void
 sgen_init_fin_weak_hash (void)
 {
 #ifdef HEAVY_STATISTICS
-	mono_counters_register ("FinWeak Successes", MONO_COUNTER_GC | MONO_COUNTER_ULONG, &stat_success);
-	mono_counters_register ("FinWeak Overflow aborts", MONO_COUNTER_GC | MONO_COUNTER_ULONG, &stat_overflow_abort);
-	mono_counters_register ("FinWeak Wait for processing", MONO_COUNTER_GC | MONO_COUNTER_ULONG, &stat_wait_for_processing);
-	mono_counters_register ("FinWeak Increment other thread", MONO_COUNTER_GC | MONO_COUNTER_ULONG, &stat_increment_other_thread);
-	mono_counters_register ("FinWeak Index decremented", MONO_COUNTER_GC | MONO_COUNTER_ULONG, &stat_index_decremented);
-	mono_counters_register ("FinWeak Entry invalidated", MONO_COUNTER_GC | MONO_COUNTER_ULONG, &stat_entry_invalidated);
+	mono_counters_register ("FinWeak Successes", MONO_COUNTER_GC | MONO_COUNTER_LONG, &stat_success);
+	mono_counters_register ("FinWeak Overflow aborts", MONO_COUNTER_GC | MONO_COUNTER_LONG, &stat_overflow_abort);
+	mono_counters_register ("FinWeak Wait for processing", MONO_COUNTER_GC | MONO_COUNTER_LONG, &stat_wait_for_processing);
+	mono_counters_register ("FinWeak Increment other thread", MONO_COUNTER_GC | MONO_COUNTER_LONG, &stat_increment_other_thread);
+	mono_counters_register ("FinWeak Index decremented", MONO_COUNTER_GC | MONO_COUNTER_LONG, &stat_index_decremented);
+	mono_counters_register ("FinWeak Entry invalidated", MONO_COUNTER_GC | MONO_COUNTER_LONG, &stat_entry_invalidated);
 #endif
 }
 

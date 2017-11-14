@@ -156,6 +156,9 @@ namespace System.Reflection.Emit {
 		public void SetCustomAttribute (CustomAttributeBuilder customBuilder) {
 			RejectIfCreated ();
 
+			if (customBuilder == null)
+				throw new ArgumentNullException ("customBuilder");
+
 			string attrname = customBuilder.Ctor.ReflectedType.FullName;
 			if (attrname == "System.Runtime.InteropServices.FieldOffsetAttribute") {
 				byte[] data = customBuilder.Data;
@@ -202,6 +205,8 @@ namespace System.Reflection.Emit {
 
 		public void SetOffset( int iOffset) {
 			RejectIfCreated ();
+			if (iOffset < 0)
+				throw new ArgumentException ("Negative field offset is not allowed");
 			offset = iOffset;
 		}
 
@@ -218,6 +223,20 @@ namespace System.Reflection.Emit {
 		{
 			if (typeb.is_created)
 				throw new InvalidOperationException ("Unable to change after type has been created.");
+		}
+
+		internal void ResolveUserTypes () {
+			type = TypeBuilder.ResolveUserType (type);
+			TypeBuilder.ResolveUserTypes (modReq);
+			TypeBuilder.ResolveUserTypes (modOpt);
+			if (marshal_info != null)
+				marshal_info.marshaltyperef = TypeBuilder.ResolveUserType (marshal_info.marshaltyperef);
+		}
+
+		internal FieldInfo RuntimeResolve () {
+			// typeb.CreateType() populates this.handle
+			var type_handle = new RuntimeTypeHandle (typeb.CreateType () as RuntimeType);
+			return FieldInfo.GetFieldFromHandle (handle, type_handle);
 		}
 
 		public override Module Module {

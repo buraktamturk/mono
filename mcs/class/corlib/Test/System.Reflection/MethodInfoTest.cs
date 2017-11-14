@@ -3,9 +3,11 @@
 //
 // Authors:
 //  Zoltan Varga (vargaz@gmail.com)
+//  Aleksey Kliger (aleksey@xamarin.com)
 //
 // (c) 2003 Ximian, Inc. (http://www.ximian.com)
 // Copyright (C) 2004 Novell, Inc (http://www.novell.com)
+// Copyright (C) 2015 Xamarin, Inc. (http://www.xamarin.com)
 //
 // Permission is hereby granted, free of charge, to any person obtaining
 // a copy of this software and associated documentation files (the
@@ -31,7 +33,7 @@ using NUnit.Framework;
 using System;
 using System.Threading;
 using System.Reflection;
-#if !MONOTOUCH
+#if !MONOTOUCH && !FULL_AOT_RUNTIME
 using System.Reflection.Emit;
 #endif
 using System.Runtime.InteropServices;
@@ -52,7 +54,12 @@ namespace MonoTests.System.Reflection
 	[TestFixture]
 	public class MethodInfoTest
 	{
+#if MONOTOUCH || FULL_AOT_RUNTIME
+		// use an existing symbol - so we can build without dlsym. It does not matter that the signature does not match for the test
+		[DllImport ("libc", EntryPoint="readlink", CharSet=CharSet.Unicode, ExactSpelling=false, PreserveSig=true, SetLastError=true, BestFitMapping=true, ThrowOnUnmappableChar=true)]
+#else
 		[DllImport ("libfoo", EntryPoint="foo", CharSet=CharSet.Unicode, ExactSpelling=false, PreserveSig=true, SetLastError=true, BestFitMapping=true, ThrowOnUnmappableChar=true)]
+#endif
 		public static extern void dllImportMethod ();
 		[MethodImplAttribute(MethodImplOptions.PreserveSig)]
 		public void preserveSigMethod ()
@@ -108,8 +115,13 @@ namespace MonoTests.System.Reflection
 			DllImportAttribute attr = (DllImportAttribute)((t.GetMethod ("dllImportMethod").GetCustomAttributes (typeof (DllImportAttribute), true)) [0]);
 
 			Assert.AreEqual (CallingConvention.Winapi, attr.CallingConvention, "#1");
+#if MONOTOUCH || FULL_AOT_RUNTIME
+			Assert.AreEqual ("readlink", attr.EntryPoint, "#2");
+			Assert.AreEqual ("libc", attr.Value, "#3");
+#else
 			Assert.AreEqual ("foo", attr.EntryPoint, "#2");
 			Assert.AreEqual ("libfoo", attr.Value, "#3");
+#endif
 			Assert.AreEqual (CharSet.Unicode, attr.CharSet, "#4");
 			Assert.AreEqual (false, attr.ExactSpelling, "#5");
 			Assert.AreEqual (true, attr.PreserveSig, "#6");
@@ -205,6 +217,7 @@ namespace MonoTests.System.Reflection
 			return (int*) 0;
 		}
 
+#if MONO_FEATURE_THREAD_ABORT
 		[Test] // bug #81538
 		public void InvokeThreadAbort ()
 		{
@@ -223,6 +236,7 @@ namespace MonoTests.System.Reflection
 		{
 			Thread.CurrentThread.Abort ();
 		}
+#endif
 
 		[Test] // bug #76541
 		public void ToStringByRef ()
@@ -273,12 +287,60 @@ namespace MonoTests.System.Reflection
 		class GBD_D : GBD_C { public new virtual void f () {} }
 		class GBD_E : GBD_D { public override    void f () {} }
 
+		class GBD_E2 : GBD_D { }
+		class GBD_F : GBD_E { }
+
+
 		[Test]
 		public void GetBaseDefinition ()
 		{
 			Assert.AreEqual (typeof (GBD_A), typeof (GBD_C).GetMethod ("f").GetBaseDefinition ().DeclaringType);
+			Assert.AreEqual (typeof (GBD_A), typeof (GBD_C).GetMethod ("f").GetBaseDefinition ().ReflectedType, "#1r");
+
 			Assert.AreEqual (typeof (GBD_D), typeof (GBD_D).GetMethod ("f").GetBaseDefinition ().DeclaringType);
+			Assert.AreEqual (typeof (GBD_D), typeof (GBD_D).GetMethod ("f").GetBaseDefinition ().ReflectedType, "#2r");
+
 			Assert.AreEqual (typeof (GBD_D), typeof (GBD_E).GetMethod ("f").GetBaseDefinition ().DeclaringType);
+			Assert.AreEqual (typeof (GBD_D), typeof (GBD_E).GetMethod ("f").GetBaseDefinition ().ReflectedType, "#3r");
+
+			Assert.AreEqual (typeof (GBD_D), typeof (GBD_E2).GetMethod ("f").GetBaseDefinition ().DeclaringType, "#4");
+			Assert.AreEqual (typeof (GBD_D), typeof (GBD_E2).GetMethod ("f").GetBaseDefinition ().ReflectedType, "#4r");
+
+			Assert.AreEqual (typeof (GBD_D), typeof (GBD_F).GetMethod ("f").GetBaseDefinition ().DeclaringType, "#5");
+			Assert.AreEqual (typeof (GBD_D), typeof (GBD_F).GetMethod ("f").GetBaseDefinition ().ReflectedType, "#5r");
+
+		}
+
+		class GenericBase<T,H> {
+			public virtual void f2 () { }
+		}
+
+		class GenericMid<T, U> : GenericBase<T, Action<U>> {
+			public virtual T f1 () { return default (T); }
+		}
+
+		class GenericChild<T> : GenericMid<T, int> {
+			public override T f1 () { return default (T); }
+			public override void f2 () { }
+		}
+
+		class DerivedFromGenericBase : GenericBase<int, int> {
+		}
+
+		[Test]
+		public void GetBaseDefinition_OpenConstructedBaseType () // 36305
+		{
+			var t = typeof (GenericChild<string>);
+
+			var mi1 = t.GetMethod ("f1");
+			var mi1_base = mi1.GetBaseDefinition ();
+
+			Assert.AreEqual (typeof (GenericMid<string, int>), mi1_base.DeclaringType, "#1");
+
+			var mi2 = t.GetMethod ("f2");
+			var mi2_base = mi2.GetBaseDefinition ();
+
+			Assert.AreEqual (typeof (GenericBase<string, Action<int>>), mi2_base.DeclaringType, "#2");
 		}
 
 		class TestInheritedMethodA {
@@ -351,7 +413,7 @@ namespace MonoTests.System.Reflection
 		[Test]
 		public void GetMethodBody ()
 		{
-#if MONOTOUCH && !DEBUG
+#if (MONOTOUCH || FULL_AOT_RUNTIME) && !DEBUG
 			Assert.Ignore ("Release app (on devices) are stripped of (managed) IL so this test would fail");
 #endif
 			MethodBody mb = typeof (MethodInfoTest).GetMethod ("locals_method").GetMethodBody ();
@@ -361,14 +423,20 @@ namespace MonoTests.System.Reflection
 
 			IList<LocalVariableInfo> locals = mb.LocalVariables;
 
-			// This might break with different compilers etc.
-			Assert.AreEqual (2, locals.Count, "#3");
+			bool foundPinnedBytePointer = false;
+			unsafe {
+				foreach (LocalVariableInfo lvi in locals) {
+					if (lvi.LocalType == typeof (byte[]))
+						// This is optimized out by CSC in .NET 4.6
+						Assert.IsFalse (lvi.IsPinned, "#3-1");
 
-			Assert.IsTrue ((locals [0].LocalType == typeof (byte[])) || (locals [1].LocalType == typeof (byte[])), "#4");
-			if (locals [0].LocalType == typeof (byte[]))
-				Assert.AreEqual (false, locals [0].IsPinned, "#5");
-			else
-				Assert.AreEqual (false, locals [1].IsPinned, "#6");
+					if (/* mcs */ lvi.LocalType == typeof (byte*) || /* csc */ lvi.LocalType == typeof (byte).MakeByRefType ()) {
+						foundPinnedBytePointer = true;
+						Assert.IsTrue (lvi.IsPinned, "#3-2");
+					}
+				}
+			}
+			Assert.IsTrue (foundPinnedBytePointer, "#4");
 		}
 
 		public int return_parameter_test ()
@@ -548,7 +616,7 @@ namespace MonoTests.System.Reflection
 			} catch (InvalidOperationException ex) {
 			}
 		}
-#if !MONOTOUCH
+#if !MONOTOUCH && !FULL_AOT_RUNTIME
 		public TFoo SimpleGenericMethod2<TFoo, TBar> () { return default (TFoo); }
 		/*Test for the uggly broken behavior of SRE.*/
 		[Test]
@@ -775,7 +843,34 @@ namespace MonoTests.System.Reflection
 			Assert.AreEqual ("System.Nullable`1[System.Int32] Bug12856()", m.ToString (), "#1");
 		}
 
-#if !MONOTOUCH
+		[Test]
+		public void GetReflectedType () // #12205
+		{
+			// public method declared in base type, queried from a derived type
+			MethodInfo mi = typeof (TestInheritedMethodB).GetMethod ("TestMethod2");
+			Assert.AreEqual (mi.ReflectedType, typeof (TestInheritedMethodB), "#1");
+
+			// public method declared in a generic class,
+			// queried from a non-generic class derived
+			// from an instantiation of the generic class.
+			mi = typeof (DerivedFromGenericBase).GetMethod ("f2");
+			Assert.AreEqual (mi.ReflectedType, typeof (DerivedFromGenericBase), "#2");
+
+			// public method declared in a generic class,
+			// queried from the generic type defintion of
+			// a generic derived class.
+			mi = typeof (GenericMid<,>).GetMethod ("f2");
+			Assert.AreEqual (mi.ReflectedType, typeof (GenericMid<,>), "#3");
+
+			// public method declared in a generic class,
+			// queried from an instantiation of a generic
+			// derived class.
+			mi = typeof (GenericMid<int,int>).GetMethod ("f2");
+			Assert.AreEqual (mi.ReflectedType, typeof (GenericMid<int,int>), "#4");
+
+		}
+
+#if !MONOTOUCH && !FULL_AOT_RUNTIME
 		class GenericClass<T>
 		{
 			public void Method ()
@@ -802,21 +897,44 @@ namespace MonoTests.System.Reflection
 			var type = typeof (GenericClass<>).GetMethod("Method").GetMethodBody().LocalVariables[0].LocalType;
 			Assert.AreEqual (typeofT, type);
 			Assert.AreEqual (typeof (GenericClass<>), type.DeclaringType);
+		
+			bool foundTypeOfK = false;
+			bool foundExpectedType = false;
+	    
+			MethodBody mb = typeof (GenericClass<>).GetMethod("Method2").GetMethodBody();
+			foreach (LocalVariableInfo lvi in mb.LocalVariables) {
+				if (lvi.LocalType == typeofK) {
+					foundTypeOfK = true;
+					Assert.AreEqual (typeof (GenericClass<>), lvi.LocalType.DeclaringType, "#1-1");
+				} else if (lvi.LocalType == typeofT) {
+					foundExpectedType = true;
+					Assert.AreEqual (typeof (GenericClass<>), lvi.LocalType.DeclaringType, "#1-2");
+				}
+			}
 
-			type = typeof (GenericClass<>).GetMethod("Method2").GetMethodBody().LocalVariables[0].LocalType;
-			Assert.AreEqual (typeofT, type);
-			Assert.AreEqual (typeof (GenericClass<>), type.DeclaringType);
-
-			type = typeof (GenericClass<>).GetMethod("Method2").GetMethodBody().LocalVariables[1].LocalType;
-			Assert.AreEqual (typeofK, type);
-			Assert.AreEqual (typeof (GenericClass<>), type.DeclaringType);
-
-			type = typeof (GenericClass<int>).GetMethod("Method2").GetMethodBody().LocalVariables[0].LocalType;
-			Assert.AreEqual (typeof (int), type);
-
-			type = typeof (GenericClass<int>).GetMethod("Method2").GetMethodBody().LocalVariables[1].LocalType;
-			Assert.AreEqual (typeofK, type);
-			Assert.AreEqual (typeof (GenericClass<>), type.DeclaringType);
+			Assert.IsTrue (foundTypeOfK, "#1-3");
+			if (mb.LocalVariables.Count < 2)
+				Assert.Ignore ("Code built in release mode - 'T var0' optmized out");
+			else
+				Assert.IsTrue (foundExpectedType, "#1-4");
+	    
+			foundTypeOfK = false;
+			foundExpectedType = false;
+			mb = typeof (GenericClass<int>).GetMethod("Method2").GetMethodBody();
+			foreach (LocalVariableInfo lvi in mb.LocalVariables) {
+				if (lvi.LocalType == typeofK) {
+					foundTypeOfK = true;
+					Assert.AreEqual (typeof (GenericClass<>), lvi.LocalType.DeclaringType, "#2-1");
+				} else if (lvi.LocalType == typeof (int)) {
+					foundExpectedType = true;
+				}
+			}
+	    
+			Assert.IsTrue (foundTypeOfK, "#2-3");
+			if (mb.LocalVariables.Count < 2)
+				Assert.Ignore ("Code built in release mode - 'int var0' optmized out");
+			else
+				Assert.IsTrue (foundExpectedType, "#2-4");
 		}
 #endif
 	}

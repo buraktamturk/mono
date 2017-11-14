@@ -90,6 +90,11 @@ namespace Mono.CSharp
 			if (!stmt.Resolve (bc))
 				return null;
 
+			if (rc.HasSet (ResolveContext.Options.FinallyScope) && rc.CurrentAnonymousMethod != null) {
+				var ats = (AsyncTaskStorey)rc.CurrentAnonymousMethod.Storey;
+				ats.HasAwaitInsideFinally = true;
+			}
+
 			type = stmt.ResultType;
 			eclass = ExprClass.Variable;
 			return this;
@@ -122,10 +127,9 @@ namespace Mono.CSharp
 			stmt.EmitStatement (ec);
 		}
 
-		public override void MarkReachable (Reachability rc)
+		public override Reachability MarkReachable (Reachability rc)
 		{
-			base.MarkReachable (rc);
-			stmt.MarkReachable (rc);
+			return stmt.MarkReachable (rc);
 		}
 
 		public override object Accept (StructuralVisitor visitor)
@@ -344,7 +348,11 @@ namespace Mono.CSharp
 
 			var errors_printer = new SessionReportPrinter ();
 			var old = bc.Report.SetPrinter (errors_printer);
-			ama = new Invocation (ama, args).Resolve (bc);
+
+			//
+			// The expression await t is classified the same way as the expression (t).GetAwaiter().GetResult(). 
+			//
+			ama = new Invocation (new ParenthesizedExpression (ama, Location.Null), args).Resolve (bc);
 			bc.Report.SetPrinter (old);
 
 			if (errors_printer.ErrorsCount > 0 || !MemberAccess.IsValidDotExpression (ama.Type)) {
@@ -505,11 +513,12 @@ namespace Mono.CSharp
 			ec.Emit (OpCodes.Ret);
 		}
 
-		public override void MarkReachable (Reachability rc)
+		public override Reachability MarkReachable (Reachability rc)
 		{
 			//
 			// Reachability has been done in AsyncInitializerStatement
 			//
+			return rc;
 		}
 	}
 
@@ -535,6 +544,8 @@ namespace Mono.CSharp
 		}
 
 		#region Properties
+
+		public bool HasAwaitInsideFinally { get; set; }
 
 		public Expression HoistedReturnValue { get; set; }
 
@@ -689,6 +700,18 @@ namespace Mono.CSharp
 
 			builder = AddCompilerGeneratedField ("$builder", new TypeExpression (bt, Location));
 
+			Field rfield;
+			if (has_task_return_type && HasAwaitInsideFinally) {
+				//
+				// Special case async block with return value from finally clause. In such case
+				// we rewrite all return expresison stores to stfld to $return. Instead of treating
+				// returns outside of finally and inside of finally differently.
+				//
+				rfield = AddCompilerGeneratedField ("$return", new TypeExpression (bt.TypeArguments [0], Location));
+			} else {
+				rfield = null;
+			}
+
 			var set_state_machine = new Method (this, new TypeExpression (Compiler.BuiltinTypes.Void, Location),
 				Modifiers.COMPILER_GENERATED | Modifiers.DEBUGGER_HIDDEN | Modifiers.PUBLIC,
 				new MemberName ("SetStateMachine"),
@@ -726,7 +749,13 @@ namespace Mono.CSharp
 			set_state_machine.Block.AddStatement (new StatementExpression (new Invocation (mg, args)));
 
 			if (has_task_return_type) {
-				HoistedReturnValue = TemporaryVariableReference.Create (bt.TypeArguments [0], StateMachineMethod.Block, Location);
+				if (rfield != null) {
+					HoistedReturnValue = new FieldExpr (rfield, Location) {
+						InstanceExpression = new CompilerGeneratedThis (CurrentType, Location.Null)
+					};
+				} else {
+					HoistedReturnValue = TemporaryVariableReference.Create (bt.TypeArguments [0], StateMachineMethod.Block, Location);
+				}
 			}
 
 			return true;
@@ -944,14 +973,17 @@ namespace Mono.CSharp
 		public StackFieldExpr (Field field)
 			: base (field, Location.Null)
 		{
+			AutomaticallyReuse = true;
 		}
+
+		public bool AutomaticallyReuse { get; set; }
 
 		public bool IsAvailableForReuse {
 			get {
 				var field = (Field) spec.MemberDefinition;
 				return field.IsAvailableForReuse;
 			}
-			set {
+			private set {
 				var field = (Field) spec.MemberDefinition;
 				field.IsAvailableForReuse = value;
 			}
@@ -961,7 +993,7 @@ namespace Mono.CSharp
 		{
 			base.AddressOf (ec, mode);
 
-			if (mode == AddressOp.Load) {
+			if (mode == AddressOp.Load && AutomaticallyReuse) {
 				IsAvailableForReuse = true;
 			}
 		}
@@ -970,7 +1002,8 @@ namespace Mono.CSharp
 		{
 			base.Emit (ec);
 
-			PrepareCleanup (ec);
+			if (AutomaticallyReuse)
+				PrepareCleanup (ec);
 		}
 
 		public void EmitLoad (EmitContext ec)

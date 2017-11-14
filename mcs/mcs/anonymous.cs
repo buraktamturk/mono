@@ -343,7 +343,7 @@ namespace Mono.CSharp {
 			}
 
 			if (hoisted == null) {
-				hoisted = new HoistedLocalVariable (this, localVariable, GetVariableMangledName (localVariable));
+				hoisted = new HoistedLocalVariable (this, localVariable, GetVariableMangledName (ec, localVariable));
 				localVariable.HoistedVariant = hoisted;
 
 				if (hoisted_locals == null)
@@ -667,7 +667,7 @@ namespace Mono.CSharp {
 			return f_ind;
 		}
 
-		protected virtual string GetVariableMangledName (LocalVariable local_info)
+		protected virtual string GetVariableMangledName (ResolveContext rc, LocalVariable local_info)
 		{
 			//
 			// No need to mangle anonymous method hoisted variables cause they
@@ -838,6 +838,11 @@ namespace Mono.CSharp {
 		public void EmitAssign (EmitContext ec, Expression source, bool leave_copy, bool isCompound)
 		{
 			GetFieldExpression (ec).EmitAssign (ec, source, leave_copy, false);
+		}
+
+		public void EmitAssignFromStack (EmitContext ec)
+		{
+			GetFieldExpression (ec).EmitAssignFromStack (ec);
 		}
 	}
 
@@ -1154,7 +1159,8 @@ namespace Mono.CSharp {
 					prev = null;
 				}
 
-				var body = CompatibleMethodBody (ec, tic, null, delegate_type);
+				HashSet<LocalVariable> undeclaredVariables = null;
+				var body = CompatibleMethodBody (ec, tic, null, delegate_type, ref undeclaredVariables);
 				if (body != null) {
 					am = body.Compatible (ec, body);
 				} else {
@@ -1163,6 +1169,10 @@ namespace Mono.CSharp {
 
 				if (TypeInferenceReportPrinter != null) {
 					ec.Report.SetPrinter (prev);
+				}
+
+				if (undeclaredVariables != null) {
+					body.Block.TopBlock.SetUndeclaredVariables (undeclaredVariables);
 				}
 			}
 
@@ -1209,8 +1219,8 @@ namespace Mono.CSharp {
 			// we satisfy the rule by setting the return type on the EmitContext
 			// to be the delegate type return type.
 			//
-
-			var body = CompatibleMethodBody (ec, null, return_type, delegate_type);
+			HashSet<LocalVariable> undeclaredVariables = null;
+			var body = CompatibleMethodBody (ec, null, return_type, delegate_type, ref undeclaredVariables);
 			if (body == null)
 				return null;
 
@@ -1268,6 +1278,15 @@ namespace Mono.CSharp {
 				throw;
 			} catch (Exception e) {
 				throw new InternalErrorException (e, loc);
+			} finally {
+				//
+				// LocalVariable is not stateless and it's not easy to clone because it's
+				// cached in toplevel block. Unsetting any initialized variables should
+				// be enough
+				//
+				if (undeclaredVariables != null) {
+					body.Block.TopBlock.SetUndeclaredVariables (undeclaredVariables);
+				}
 			}
 
 			if (!ec.IsInProbingMode && !etree_conversion) {
@@ -1387,13 +1406,13 @@ namespace Mono.CSharp {
 			return ExprClassName;
 		}
 
-		AnonymousMethodBody CompatibleMethodBody (ResolveContext ec, TypeInferenceContext tic, TypeSpec return_type, TypeSpec delegate_type)
+		AnonymousMethodBody CompatibleMethodBody (ResolveContext ec, TypeInferenceContext tic, TypeSpec return_type, TypeSpec delegate_type, ref HashSet<LocalVariable> undeclaredVariables)
 		{
 			ParametersCompiled p = ResolveParameters (ec, tic, delegate_type);
 			if (p == null)
 				return null;
 
-			ParametersBlock b = ec.IsInProbingMode ? (ParametersBlock) Block.PerformClone () : Block;
+			ParametersBlock b = ec.IsInProbingMode ? (ParametersBlock) Block.PerformClone (ref undeclaredVariables) : Block;
 
 			if (b.IsAsync) {
 				var rt = return_type;
@@ -1581,6 +1600,15 @@ namespace Mono.CSharp {
 			if (res && errors != ec.Report.Errors)
 				return null;
 
+			if (block.IsAsync && block.Original.ParametersBlock.HasCapturedThis && ec.CurrentAnonymousMethod != null && ec.CurrentAnonymousMethod.block.IsAsync) {
+				//
+				// We'll do ldftn to load the fabricated m_X method but
+				// because we are inside struct the method can be hoisted
+				// anywhere in the parent scope
+				//
+				ec.CurrentBlock.ParametersBlock.HasReferenceToStoreyForInstanceLambdas = true;
+			}
+
 			return res ? this : null;
 		}
 
@@ -1629,9 +1657,10 @@ namespace Mono.CSharp {
 			fc.TryFinally = prev_tf;
 		}
 
-		public override void MarkReachable (Reachability rc)
+		public override Reachability MarkReachable (Reachability rc)
 		{
 			block.MarkReachable (rc);
+			return rc;
 		}
 
 		public void SetHasThisAccess ()
@@ -1784,6 +1813,8 @@ namespace Mono.CSharp {
 							parent = storey = sm;
 						}
 					}
+				} else if (src_block.ParametersBlock.HasReferenceToStoreyForInstanceLambdas) {
+					src_block.ParametersBlock.StateMachine.AddParentStoreyReference (ec, storey);
 				}
 
 				modifiers = storey != null ? Modifiers.INTERNAL : Modifiers.PRIVATE;

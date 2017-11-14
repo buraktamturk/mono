@@ -36,14 +36,12 @@ namespace System.Net
 {
 	delegate void SimpleAsyncCallback (SimpleAsyncResult result);
 
-	delegate bool SimpleAsyncFunc (SimpleAsyncResult result);
-
 	class SimpleAsyncResult : IAsyncResult
 	{
 		ManualResetEvent handle;
 		bool synch;
 		bool isCompleted;
-		SimpleAsyncCallback cb;
+		readonly SimpleAsyncCallback cb;
 		object state;
 		bool callbackDone;
 		Exception exc;
@@ -63,7 +61,7 @@ namespace System.Net
 			};
 		}
 
-		public static void Run (SimpleAsyncFunc func, SimpleAsyncCallback callback)
+		public static void Run (Func<SimpleAsyncResult, bool> func, SimpleAsyncCallback callback)
 		{
 			var result = new SimpleAsyncResult (callback);
 			try {
@@ -74,7 +72,7 @@ namespace System.Net
 			}
 		}
 
-		public static void RunWithLock (object locker, SimpleAsyncFunc func, SimpleAsyncCallback callback)
+		public static void RunWithLock (object locker, Func<SimpleAsyncResult, bool> func, SimpleAsyncCallback callback)
 		{
 			Run (inner => {
 				bool running = func (inner);
@@ -83,14 +81,14 @@ namespace System.Net
 				return running;
 			}, inner => {
 				if (inner.GotException) {
-					if (inner.CompletedSynchronously)
+					if (inner.synch)
 						Monitor.Exit (locker);
 					callback (inner);
 					return;
 				}
 
 				try {
-					if (!inner.CompletedSynchronously)
+					if (!inner.synch)
 						Monitor.Enter (locker);
 
 					callback (inner);
@@ -123,7 +121,7 @@ namespace System.Net
 			DoCallback_private ();
 		}
 
-		protected void SetCompleted_internal (bool synch, Exception e)
+		void SetCompleted_internal (bool synch, Exception e)
 		{
 			this.synch = synch;
 			exc = e;
@@ -136,13 +134,7 @@ namespace System.Net
 
 		protected void SetCompleted_internal (bool synch)
 		{
-			this.synch = synch;
-			exc = null;
-			lock (locker) {
-				isCompleted = true;
-				if (handle != null)
-					handle.Set ();
-			}
+			SetCompleted_internal (synch, null);
 		}
 
 		void DoCallback_private ()
@@ -194,8 +186,30 @@ namespace System.Net
 			}
 		}
 
+		bool? user_read_synch;
+
 		public bool CompletedSynchronously {
-			get { return synch; }
+			get {
+				//
+				// CompletedSynchronously (for System.Net networking stack) means "was the operation completed before the first time
+				// that somebody asked if it was completed synchronously"? They do this because some of their asynchronous operations
+				// (particularly those in the Socket class) will avoid the cost of capturing and transferring the ExecutionContext
+				// to the callback thread by checking CompletedSynchronously, and calling the callback from within BeginXxx instead of
+				// on the completion port thread if the native winsock call completes quickly.
+				//
+				// TODO: racy
+				if (user_read_synch != null)
+					return user_read_synch.Value;
+
+				user_read_synch	= synch;
+				return user_read_synch.Value;
+			}
+		}
+
+		internal bool CompletedSynchronouslyPeek {
+			get {
+				return synch;
+			}
 		}
 
 		public bool IsCompleted {

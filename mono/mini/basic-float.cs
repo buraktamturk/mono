@@ -26,14 +26,14 @@ using System.Reflection;
 /* A comparison made to same variable. */
 #pragma warning disable 1718
 
-#if MOBILE
+#if __MOBILE__
 class FloatTests
 #else
 class Tests
 #endif
 {
 
-#if !MOBILE
+#if !__MOBILE__
 	public static int Main (string[] args) {
 		return TestDriver.RunTests (typeof (Tests), args);
 	}
@@ -631,8 +631,8 @@ class Tests
 	public static int test_0_float_precision () {
 		float f1 = 3.40282346638528859E+38f;
 		float f2 = 3.40282346638528859E+38f;		
-		float PositiveInfinity =  1.0f / 0.0f;
-		float f = f1 + f2;
+		float PositiveInfinity =  (float)(1.0f / 0.0f);
+		float f = (float)(f1 + f2);
 
 		return f == PositiveInfinity ? 0 : 1;
 	}

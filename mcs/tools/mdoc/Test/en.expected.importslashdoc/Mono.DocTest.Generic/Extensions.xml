@@ -88,8 +88,8 @@
       <Docs>
         <param name="list">To be added.</param>
         <summary>
-          <see cref="T:System.Collections.Generic.IEnumerable{System.Int32}" />
-            extension method.
+          <see cref="T:System.Collections.Generic.IEnumerable{System.Int32}" /> 
+              extension method.
             </summary>
         <returns>To be added.</returns>
         <remarks>
@@ -136,6 +136,11 @@
       <AssemblyInfo>
         <AssemblyVersion>0.0.0.0</AssemblyVersion>
       </AssemblyInfo>
+      <Attributes>
+        <Attribute>
+          <AttributeName>System.Runtime.CompilerServices.IteratorStateMachine(typeof(Mono.DocTest.Generic.Extensions/&lt;ToEnumerable&gt;d__0`1))</AttributeName>
+        </Attribute>
+      </Attributes>
       <ReturnValue>
         <ReturnType>System.Collections.Generic.IEnumerable&lt;T&gt;</ReturnType>
       </ReturnValue>

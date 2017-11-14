@@ -1,10 +1,12 @@
-/*
- * mono-filemap.c: Unix/Windows implementation for filemap.
+/**
+ * \file
+ * Unix/Windows implementation for filemap.
  *
  * Author:
  *   Paolo Molaro (lupus@ximian.com)
  *
  * Copyright 2008-2008 Novell, Inc.
+ * Licensed under the MIT license. See LICENSE file in the project root for full license information.
  */
 
 #include "config.h"

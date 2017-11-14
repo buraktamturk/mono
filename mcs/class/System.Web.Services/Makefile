@@ -3,35 +3,28 @@ SUBDIRS =
 include ../../build/rules.make
 
 LIBRARY = System.Web.Services.dll
-MOBILE := $(filter monotouch monotouch_watch monodroid xammac mobile mobile_static, $(PROFILE))
-ifdef MOBILE
+KEYFILE = ../msfinal.pub
+ifdef MOBILE_PROFILE
 LIB_REFS = System System.Xml
 LIB_MCS_FLAGS = \
-	-nowarn:649 -nowarn:169			\
-	-r:$(corlib)				\
-	-r:System.dll				\
-	-r:System.Xml.dll			\
+	-nowarn:649 -nowarn:168		\
 	-resource:System.Web.Services.Description/wsdl-1.1.xsd,wsdl-1.1.xsd \
 	-resource:System.Web.Services.Description/wsdl-1.1-soap.xsd,wsdl-1.1-soap.xsd \
 	-resource:System.Web.Services.Description/web-reference.xsd,web-reference.xsd
 else
 LIB_REFS = System System.EnterpriseServices System.Xml System.Data
-LIB_MCS_FLAGS = -nowarn:168,169,219,414,612,649 -d:MONO_BROKEN_CONFIGURATION_DLL
+LIB_MCS_FLAGS = -nowarn:168,612,618,649 -d:MONO_BROKEN_CONFIGURATION_DLL
 
 ifndef NO_SYSTEM_WEB_DEPENDENCY
-LIB_REFS += System.Web
-plainweb_dir = $(the_libdir_base)plainweb
-plainweb = $(plainweb_dir)/System.Web.dll
-system_web_services_deps = $(plainweb)
-LOCAL_MCS_FLAGS += -lib:$(plainweb_dir)
+plainweb = $(the_libdir_base)plainweb/System.Web.dll
+system_web_deps = $(plainweb)
+LIB_REFS += plainweb/System.Web
 endif
 
 ifndef NO_SYSTEM_DESIGN_DEPENDENCY
-LIB_REFS += System.Design
-plaindesign_dir = $(the_libdir_base)plaindesign
-plaindesign = $(plaindesign_dir)/System.Design.dll
+plaindesign = $(the_libdir_base)plaindesign/System.Design.dll
 system_design_deps = $(plaindesign)
-LOCAL_MCS_FLAGS += -lib:$(plaindesign_dir)
+LIB_REFS += plaindesign/System.Design
 endif
 
 ifndef NO_SYSTEM_DIRECTORY_SERVICES_DEPENDENCY
@@ -47,6 +40,14 @@ endif
 
 TEST_MCS_FLAGS = $(LIB_MCS_FLAGS) -nowarn:618
 
+ifndef NO_THREAD_ABORT
+TEST_MCS_FLAGS += -d:MONO_FEATURE_THREAD_ABORT
+endif
+
+ifndef NO_THREAD_SUSPEND_RESUME
+TEST_MCS_FLAGS += -d:MONO_FEATURE_THREAD_SUSPEND_RESUME
+endif
+
 EXTRA_DISTFILES = \
 	System.Web.Services.Description/web-reference.xsd	\
 	System.Web.Services.Description/wsdl-1.1.xsd		\
@@ -56,7 +57,7 @@ EXTRA_DISTFILES = \
 
 include ../../build/library.make
 
-$(the_libdir_base)$(LIBRARY): $(system_web_services_deps) $(system_design_deps)
+$(the_libdir_base)$(LIBRARY): $(system_web_deps) $(system_design_deps)
 
 $(plainweb):
 	(cd ../System.Web; $(MAKE) $@)

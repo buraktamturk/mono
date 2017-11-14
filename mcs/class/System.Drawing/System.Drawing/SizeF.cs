@@ -40,7 +40,9 @@ namespace System.Drawing
 {
 	[Serializable]
 	[ComVisible (true)]
+#if !MONOTOUCH && !MONOMAC && FEATURE_TYPECONVERTER
 	[TypeConverter (typeof (SizeFConverter))]
+#endif
 	public struct SizeF
 	{
 		// Private height and width fields.

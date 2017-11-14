@@ -4,19 +4,21 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
+using System.Collections;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 
 /*
  * Regression tests for the AOT/FULL-AOT code.
  */
 
-#if MOBILE
+#if __MOBILE__
 class AotTests
 #else
 class Tests
 #endif
 {
-#if !MOBILE
+#if !__MOBILE__
 	static int Main (String[] args) {
 		return TestDriver.RunTests (typeof (Tests), args);
 	}
@@ -24,6 +26,7 @@ class Tests
 
 	public delegate void ArrayDelegate (int[,] arr);
 
+	[Category ("!WASM")] //Requires a working threadpool
 	static int test_0_array_delegate_full_aot () {
 		ArrayDelegate d = delegate (int[,] arr) {
 		};
@@ -83,6 +86,7 @@ class Tests
 	}
 
 	[Category ("DYNCALL")]
+	[Category ("!FULLAOT-AMD64")]
 	static int test_0_arm64_dyncall_hfa_double () {
 		double arg1 = 1.0f;
 		// HFA with double members
@@ -96,6 +100,7 @@ class Tests
 	}
 
 	[Category ("DYNCALL")]
+	[Category ("!FULLAOT-AMD64")]
 	static int test_0_arm64_dyncall_hfa_float () {
 		double arg1 = 1.0f;
 		var s = new Struct2 ();
@@ -109,6 +114,7 @@ class Tests
 
 	[Category ("DYNCALL")]
 	[Category ("GSHAREDVT")]
+	[Category ("!FULLAOT-AMD64")]
 	static int test_0_arm64_dyncall_gsharedvt_out_hfa_double () {
 		/* gsharedvt out trampoline with double hfa argument */
 		double arg1 = 1.0f;
@@ -128,6 +134,7 @@ class Tests
 
 	[Category ("DYNCALL")]
 	[Category ("GSHAREDVT")]
+	[Category ("!FULLAOT-AMD64")]
 	static int test_0_arm64_dyncall_gsharedvt_out_hfa_float () {
 		/* gsharedvt out trampoline with double hfa argument */
 		double arg1 = 1.0f;
@@ -189,6 +196,8 @@ class Tests
 	}
 
 	[Category ("DYNCALL")]
+	[Category ("GSHAREDVT")]
+	[Category ("!FULLAOT-AMD64")]
 	static int test_0_arm64_dyncall_vtypebyref_ret () {
 		var s = new VTypeByRefStruct () { o1 = 1, o2 = 2, o3 = 3 };
 		Type t = typeof (Foo5<>).MakeGenericType (new Type [] { typeof (VTypeByRefStruct) });
@@ -209,7 +218,8 @@ class Tests
 		}
 	}
 
-	[Category("DYNCALL")]
+	[Category ("DYNCALL")]
+	[Category ("GSHAREDVT")]
 	static int test_0_arm_dyncall_reg_stack_split () {
 		var m = typeof (Foo6).GetMethod ("reg_stack_split_inner").MakeGenericMethod (new Type[] { typeof (long) });
 		var o = new Foo6 ();
@@ -237,9 +247,20 @@ class Tests
 		public static T GetValue<T>(Nullable<T> value) where T : struct {
 			return value.Value;
 		}
+
+		[MethodImplAttribute (MethodImplOptions.NoInlining)]
+		public static Nullable<T> Get<T>(T t) where T : struct {
+			return t;
+		}
+
+		[MethodImplAttribute (MethodImplOptions.NoInlining)]
+		public static Nullable<T> GetNull<T>() where T : struct {
+			return null;
+		}
 	}
 
 	[Category ("DYNCALL")]
+	[Category ("!FULLAOT-AMD64")]
 	public static int test_0_dyncall_nullable () {
 		int? v;
 
@@ -258,6 +279,14 @@ class Tests
 		var res = (int)typeof (NullableMethods).GetMethod ("GetValue").MakeGenericMethod (new Type [] { typeof (int) }).Invoke (null, new object [] { v });
 		if (res != 42)
 			return 3;
+
+		NullableMethods.Get (42);
+		var res2 = (int?)typeof (NullableMethods).GetMethod ("Get").MakeGenericMethod (new Type [] { typeof (int) }).Invoke (null, new object [] { 42 });
+		if (res2 != 42)
+			return 4;
+		res2 = (int?)typeof (NullableMethods).GetMethod ("GetNull").MakeGenericMethod (new Type [] { typeof (int) }).Invoke (null, new object [] { });
+		if (res2.HasValue)
+			return 5;
 		return 0;
 	}
 
@@ -289,6 +318,185 @@ class Tests
 		Dictionary<long, int> newDict = ConvertDictionary(data);
 		if (newDict.Count != 1)
 			return 1;
+		return 0;
+	}
+
+	enum LongEnum : ulong {
+		A = 1
+			}
+
+	public static int test_0_long_enum_eq_comparer () {
+		var c = EqualityComparer<LongEnum>.Default;
+		c.GetHashCode (LongEnum.A);
+		return 0;
+	}
+
+	enum UInt32Enum : uint {
+		A = 1
+			}
+
+	enum Int32Enum : int {
+		A = 1
+			}
+
+	enum Int16Enum : short {
+		A = 1
+			}
+
+	enum UInt16Enum : ushort {
+		A = 1
+			}
+
+	enum Int8Enum : sbyte {
+		A = 1
+			}
+
+	enum UInt8Enum : byte {
+		A = 1
+			}
+
+	public static int test_0_int_enum_eq_comparer () {
+		var t1 = new Dictionary<Int32Enum, object> ();
+		t1 [Int32Enum.A] = "foo";
+
+		var t2 = new Dictionary<UInt32Enum, object> ();
+		t2 [UInt32Enum.A] = "foo";
+
+		var t3 = new Dictionary<UInt16Enum, object> ();
+		t3 [UInt16Enum.A] = "foo";
+
+		var t4 = new Dictionary<Int16Enum, object> ();
+		t4 [Int16Enum.A] = "foo";
+
+		var t5 = new Dictionary<Int8Enum, object> ();
+		t5 [Int8Enum.A] = "foo";
+
+		var t6 = new Dictionary<UInt8Enum, object> ();
+		t6 [UInt8Enum.A] = "foo";
+
+		return 0;
+	}
+
+	[Category ("DYNCALL")]
+	public static int test_0_array_accessor_runtime_invoke_ref () {
+		var t = typeof (string[]);
+		var arr = Array.CreateInstance (typeof (string), 1);
+		arr.GetType ().GetMethod ("Set").Invoke (arr, new object [] { 0, "A" });
+		var res = (string)arr.GetType ().GetMethod ("Get").Invoke (arr, new object [] { 0 });
+		if (res != "A")
+			return 1;
+		return 0;
+	}
+
+	public static void SetArrayValue_<T> (T[] values) {
+		values.Select (x => x).ToArray ();
+	}
+
+	[Category ("GSHAREDVT")]
+	public static int test_0_delegate_invoke_wrappers_gsharedvt () {
+		var enums = new LongEnum [] { LongEnum.A };
+		SetArrayValue_ (enums);
+		return 0;
+	}
+
+	struct LargeStruct {
+		public int a, b, c, d;
+	}
+
+	[MethodImplAttribute (MethodImplOptions.NoInlining)]
+	public static bool GetHasValue<T>(T? value) where T : struct
+	{
+		return value.HasValue;
+	}
+
+	[Category ("DYNCALL")]
+	[Category ("!FULLAOT-AMD64")]
+	public static int test_0_large_nullable_invoke () {
+		var s = new LargeStruct () { a = 1, b = 2, c = 3, d = 4 };
+
+		GetHasValue<LargeStruct> (s);
+
+#if __MOBILE__
+		var m = typeof(AotTests).GetMethod("GetHasValue", BindingFlags.Static | BindingFlags.Public);
+#else
+		var m = typeof(Tests).GetMethod("GetHasValue", BindingFlags.Static | BindingFlags.Public);
+#endif
+
+		Type type = typeof (LargeStruct?).GetGenericArguments () [0];
+		bool b1 = (bool)m.MakeGenericMethod (new Type[] {type}).Invoke (null, new object[] { s });
+		if (!b1)
+			return 1;
+		bool b2 = (bool)m.MakeGenericMethod (new Type[] {type}).Invoke (null, new object[] { null });
+		if (b2)
+			return 2;
+		return 0;
+	}
+
+	struct FpStruct {
+		public float a, b, c;
+	}
+
+	struct LargeStruct2 {
+		public FpStruct x;
+		public int a, b, c, d, e, f, g, h;
+	}
+
+	[MethodImplAttribute (MethodImplOptions.NoInlining)]
+	static int pass_hfa_on_stack (FpStruct s1, FpStruct s2, FpStruct s3) {
+		return (int)s3.c;
+	}
+
+	public static int test_10_arm64_hfa_on_stack_llvm () {
+		var arr = new LargeStruct2 [10, 10];
+		for (int i = 0; i < 10; ++i)
+			for (int j = 0; j < 10; ++j)
+				arr [i, j].x = new FpStruct ();
+
+		var s1 = new FpStruct () { a = 1, b = 1, c = 10 };
+		return pass_hfa_on_stack (s1, s1, s1);
+	}
+
+	public static int test_0_get_current_method () {
+		var m = MethodBase.GetCurrentMethod ();
+#if __MOBILE__
+		var m2 = typeof (AotTests).GetMethod ("test_0_get_current_method");
+#else
+		var m2 = typeof (Tests).GetMethod ("test_0_get_current_method");
+#endif
+		return m == m2 ? 0 : 1;
+	}
+
+	class GetCurrentMethodClass<T> {
+		[MethodImplAttribute (MethodImplOptions.NoInlining)]
+		public MethodBase get_current () {
+			return MethodBase.GetCurrentMethod ();
+		}
+	}
+
+	public static int test_0_get_current_method_generic () {
+		var c = new GetCurrentMethodClass<string> ();
+		var m = c.get_current ();
+		var m2 = typeof (GetCurrentMethodClass<>).GetMethod ("get_current");
+		return m == m2 ? 0 : 1;
+	}
+
+	public static int test_0_array_wrappers_runtime_invoke () {
+		string[][] arr = new string [10][];
+		IEnumerable<string[]> iface = arr;
+		var m = typeof(IEnumerable<string[]>).GetMethod ("GetEnumerator");
+		m.Invoke (arr, null);
+		return 0;
+	}
+
+	public static int test_0_fault_clauses () {
+		object [] data = { 1, 2, 3 };
+		int [] expected = { 1, 2, 3 };
+
+		try {
+			Action d = delegate () { data.Cast<IEnumerable> ().GetEnumerator ().MoveNext (); };
+			d ();
+		} catch (Exception ex) {
+		}
 		return 0;
 	}
 }

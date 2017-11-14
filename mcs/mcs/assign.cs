@@ -390,6 +390,7 @@ namespace Mono.CSharp {
 
 			return System.Linq.Expressions.Expression.Assign (target_object, source_object);
 		}
+
 		protected virtual Expression ResolveConversions (ResolveContext ec)
 		{
 			source = Convert.ImplicitConversionRequired (ec, source, target.Type, source.Location);
@@ -501,13 +502,17 @@ namespace Mono.CSharp {
 				pe.SetBackingFieldAssigned (fc);
 				return;
 			}
+
+			var td = target as TupleDeconstruct;
+			if (td != null) {
+				td.SetGeneratedFieldAssigned (fc);
+				return;
+			}
 		}
 
-		public override void MarkReachable (Reachability rc)
+		public override Reachability MarkReachable (Reachability rc)
 		{
-			var es = source as ExpressionStatement;
-			if (es != null)
-				es.MarkReachable (rc);
+			return source.MarkReachable (rc);
 		}
 	}
 
@@ -719,9 +724,11 @@ namespace Mono.CSharp {
 				this.loc = child.Location;
 			}
 
+			public bool RequiresEmitWithAwait { get; set; }
+
 			public override bool ContainsEmitWithAwait ()
 			{
-				return child.ContainsEmitWithAwait ();
+				return RequiresEmitWithAwait || child.ContainsEmitWithAwait ();
 			}
 
 			public override Expression CreateExpressionTree (ResolveContext ec)

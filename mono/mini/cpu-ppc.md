@@ -128,6 +128,8 @@ storer8_memindex: dest:b src1:i src2:i len:4
 loadu4_mem: dest:i len:8
 move: dest:i src1:i len:4
 fmove: dest:f src1:f len:4
+move_f_to_i4: dest:i src1:f len:8
+move_i4_to_f: dest:f src1:i len:8
 add_imm: dest:i src1:i len:4
 sub_imm: dest:i src1:i len:4
 mul_imm: dest:i src1:i len:4
@@ -196,6 +198,9 @@ float_cgt_un: dest:i src1:f src2:f len:20
 float_clt: dest:i src1:f src2:f len:16
 float_clt_un: dest:i src1:f src2:f len:20
 float_conv_to_u: dest:i src1:f len:36
+float_cneq: dest:i src1:f src2:f len:16
+float_cge: dest:i src1:f src2:f len:16
+float_cle: dest:i src1:f src2:f len:16
 call_handler: len:12 clob:c
 endfilter: src1:i len:32
 aot_const: dest:i len:8
@@ -212,7 +217,6 @@ ppc_subfic: dest:i src1:i len:4
 ppc_subfze: dest:i src1:i len:4
 bigmul: len:12 dest:l src1:i src2:i
 bigmul_un: len:12 dest:l src1:i src2:i
-tls_get: len:20 dest:i
 
 # Linear IR opcodes
 dummy_use: src1:i len:0
@@ -288,6 +292,12 @@ int_cgt_un: dest:i len:12
 int_clt: dest:i len:12
 int_clt_un: dest:i len:12
 
+int_cneq: dest:i len:12
+int_cge: dest:i len:12
+int_cle: dest:i len:12
+int_cge_un: dest:i len:12
+int_cle_un: dest:i len:12
+
 cond_exc_ieq: len:8
 cond_exc_ine_un: len:8
 cond_exc_ilt: len:8
@@ -316,3 +326,5 @@ jump_table: dest:i len:8
 
 atomic_add_i4: src1:b src2:i dest:i len:28
 atomic_cas_i4: src1:b src2:i src3:i dest:i len:38
+
+gc_safe_point: len:0

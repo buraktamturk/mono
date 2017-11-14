@@ -1,10 +1,12 @@
-/*
- * filewatcher.c: File System Watcher internal calls
+/**
+ * \file
+ * File System Watcher internal calls
  *
  * Authors:
  *	Gonzalo Paniagua Javier (gonzalo@ximian.com)
  *
  * Copyright 2004-2009 Novell, Inc (http://www.novell.com)
+ * Licensed under the MIT license. See LICENSE file in the project root for full license information.
  */
 
 #ifdef HAVE_CONFIG_H
@@ -27,6 +29,8 @@
 #include <mono/metadata/marshal.h>
 #include <mono/utils/mono-dl.h>
 #include <mono/utils/mono-io-portability.h>
+#include <mono/metadata/w32error.h>
+
 #ifdef HOST_WIN32
 
 /*
@@ -107,12 +111,15 @@ ves_icall_System_IO_FAMW_InternalFAMNextEvent (gpointer conn,
 					       gint *code,
 					       gint *reqnum)
 {
+	MonoError error;
 	FAMEvent ev;
 
 	if (FAMNextEvent (conn, &ev) == 1) {
-		*filename = mono_string_new (mono_domain_get (), ev.filename);
+		*filename = mono_string_new_checked (mono_domain_get (), ev.filename, &error);
 		*code = ev.code;
 		*reqnum = ev.fr.reqnum;
+		if (mono_error_set_pending_exception (&error))
+			return FALSE;
 		return TRUE;
 	}
 
@@ -148,13 +155,16 @@ ves_icall_System_IO_InotifyWatcher_GetInotifyInstance ()
 int
 ves_icall_System_IO_InotifyWatcher_AddWatch (int fd, MonoString *name, gint32 mask)
 {
+	MonoError error;
 	char *str, *path;
 	int retval;
 
 	if (name == NULL)
 		return -1;
 
-	str = mono_string_to_utf8 (name);
+	str = mono_string_to_utf8_checked (name, &error);
+	if (mono_error_set_pending_exception (&error))
+		return -1;
 	path = mono_portability_find_file (str, TRUE);
 	if (!path)
 		path = str;
@@ -230,9 +240,9 @@ ves_icall_System_IO_KqueueMonitor_kevent_notimeout (int *kq_ptr, gpointer change
 		return -1;
 	}
 
-	MONO_PREPARE_BLOCKING;
+	MONO_ENTER_GC_SAFE;
 	res = kevent (*kq_ptr, changelist, nchanges, eventlist, nevents, NULL);
-	MONO_FINISH_BLOCKING;
+	MONO_EXIT_GC_SAFE;
 
 	mono_thread_info_uninstall_interrupt (&interrupted);
 

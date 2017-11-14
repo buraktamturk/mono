@@ -1,5 +1,6 @@
-/*
- * mono-threads-coop.h: Cooperative suspend thread helpers
+/**
+ * \file
+ * Cooperative suspend thread helpers
  *
  * Author:
  *	Rodrigo Kumpera (kumpera@gmail.com)
@@ -11,65 +12,67 @@
 #define __MONO_THREADS_COOP_H__
 
 #include <config.h>
+#include <glib.h>
 
-#ifdef USE_COOP_GC
+#include "checked-build.h"
+#include "mono-threads.h"
+#include "mono-threads-api.h"
 
-/* Runtime consumable API */
-
-#define MONO_SUSPEND_CHECK() do {	\
-	if (G_UNLIKELY (mono_polling_required)) mono_threads_state_poll ();	\
-} while (0);
-
-#define MONO_PREPARE_BLOCKING	\
-{	\
-	void *__blocking_cookie = mono_threads_prepare_blocking ();
-
-#define MONO_FINISH_BLOCKING \
-	mono_threads_finish_blocking (__blocking_cookie);	\
-}
-
-#define MONO_PREPARE_RESET_BLOCKING	\
-{	\
-	void *__reset_cookie = mono_threads_reset_blocking_start ();
-
-#define MONO_FINISH_RESET_BLOCKING \
-	mono_threads_reset_blocking_end (__reset_cookie);	\
-}
-
-#define MONO_TRY_BLOCKING	\
-{	\
-	void *__try_block_cookie = mono_threads_try_prepare_blocking ();
-
-#define MONO_FINISH_TRY_BLOCKING \
-	mono_threads_finish_try_blocking (__try_block_cookie);	\
-}
-
-/* Internal API */
-
-void mono_threads_state_poll (void);
-void* mono_threads_prepare_blocking (void);
-void mono_threads_finish_blocking (void* cookie);
-
-void* mono_threads_reset_blocking_start (void);
-void mono_threads_reset_blocking_end (void* cookie);
-
-void* mono_threads_try_prepare_blocking (void);
-void mono_threads_finish_try_blocking (void* cookie);
+G_BEGIN_DECLS
 
 /* JIT specific interface */
 extern volatile size_t mono_polling_required;
 
-#else
+/* Runtime consumable API */
 
-#define MONO_SUSPEND_CHECK() do {	} while (0);
-#define MONO_PREPARE_BLOCKING {
-#define MONO_FINISH_BLOCKING }
-#define MONO_PREPARE_RESET_BLOCKING {
-#define MONO_FINISH_RESET_BLOCKING }
-#define MONO_TRY_BLOCKING {
-#define MONO_FINISH_TRY_BLOCKING }
+gboolean
+mono_threads_is_coop_enabled (void);
 
-#endif /* USE_COOP_GC */
+gboolean
+mono_threads_is_blocking_transition_enabled (void);
 
+/* Internal API */
+
+void
+mono_threads_state_poll (void);
+
+static inline void
+mono_threads_safepoint (void)
+{
+	if (G_UNLIKELY (mono_polling_required))
+		mono_threads_state_poll ();
+}
+
+/*
+ * The following are used when detaching a thread. We need to pass the MonoThreadInfo*
+ * as a paramater as the thread info TLS key is being destructed, meaning that
+ * mono_thread_info_current_unchecked will return NULL, which would lead to a
+ * runtime assertion error when trying to switch the state of the current thread.
+ */
+
+gpointer
+mono_threads_enter_gc_safe_region_with_info (THREAD_INFO_TYPE *info, gpointer *stackdata);
+
+#define MONO_ENTER_GC_SAFE_WITH_INFO(info)	\
+	do {	\
+		gpointer __gc_safe_dummy;	\
+		gpointer __gc_safe_cookie = mono_threads_enter_gc_safe_region_with_info ((info), &__gc_safe_dummy)
+
+#define MONO_EXIT_GC_SAFE_WITH_INFO	MONO_EXIT_GC_SAFE
+
+gpointer
+mono_threads_enter_gc_unsafe_region_with_info (THREAD_INFO_TYPE *info, gpointer *stackdata);
+
+#define MONO_ENTER_GC_UNSAFE_WITH_INFO(info)	\
+	do {	\
+		gpointer __gc_unsafe_dummy;	\
+		gpointer __gc_unsafe_cookie = mono_threads_enter_gc_unsafe_region_with_info ((info), &__gc_unsafe_dummy)
+
+#define MONO_EXIT_GC_UNSAFE_WITH_INFO	MONO_EXIT_GC_UNSAFE
+
+gpointer
+mono_threads_enter_gc_unsafe_region_unbalanced_with_info (THREAD_INFO_TYPE *info, gpointer *stackdata);
+
+G_END_DECLS
 
 #endif

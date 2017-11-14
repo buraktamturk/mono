@@ -26,7 +26,7 @@ using System.Runtime.CompilerServices;
  * the IL code looks.
  */
 
-#if MOBILE
+#if __MOBILE__
 namespace ObjectTests
 {
 #endif
@@ -119,7 +119,7 @@ struct Gamma {
 
 class Tests {
 
-#if !MOBILE
+#if !__MOBILE__
 	public static int Main (string[] args) {
 		return TestDriver.RunTests (typeof (Tests), args);
 	}
@@ -639,6 +639,7 @@ class Tests {
 	public static int test_0_vector_array_cast () {
 		Array arr1 = Array.CreateInstance (typeof (int), new int[] {1}, new int[] {0});
 		Array arr2 = Array.CreateInstance (typeof (int), new int[] {1}, new int[] {10});
+		Array arr5 = Array.CreateInstance (typeof (string), new int[] {1}, new int[] {10});
 
 		if (arr1.GetType () != typeof (int[]))
 			return 1;
@@ -659,6 +660,9 @@ class Tests {
 
 		if (arr2 is int[])
 			return 4;
+		var as_object_arr = arr5 as object [];
+		if (as_object_arr != null)
+			return 5;
 
 		int [,] [] arr3 = new int [1, 1] [];
 		object o = arr3;
@@ -874,6 +878,49 @@ class Tests {
 		return 2;
 	}
 
+	class InstanceDelegateTest {
+		public int a;
+
+		public int return_field () {
+			return a;
+		}
+	}
+
+	public static int test_2_instance_delegate_with_field () {
+		InstanceDelegateTest t = new InstanceDelegateTest () { a = 1337 };
+		GetIntDel del = new GetIntDel (t.return_field);
+		int v = del ();
+		if (v != 1337)
+			return 0;
+		return 2;
+	}
+
+	interface IFaceVirtualDel {
+		int return_field ();
+	}
+
+	struct VtypeVirtualDelStruct : IFaceVirtualDel {
+		public int f;
+		public int return_field_nonvirt () {
+			return f;
+		}
+		public int return_field () {
+			return f;
+		}
+	}
+
+	public static int test_42_vtype_delegate () {
+		var s = new VtypeVirtualDelStruct () { f = 42 };
+		Func<int> f = s.return_field_nonvirt;
+		return f ();
+	}
+
+	public static int test_42_vtype_virtual_delegate () {
+		IFaceVirtualDel s = new VtypeVirtualDelStruct () { f = 42 };
+		Func<int> f = s.return_field;
+		return f ();
+	}
+
 	public static int test_1_store_decimal () {
 		decimal[,] a = {{1}};
 
@@ -985,6 +1032,19 @@ class Tests {
 		if (!(b <= System.Byte.MaxValue))
 			return 3;
 		
+		return 0;
+	}
+
+	static Nullable<bool> s_nullb;
+	static AStruct s_struct1;
+
+	/* test if VES uses correct sizes for value type write to static field */
+	public static int test_0_static_nullable_bool () {
+		s_struct1 = new AStruct (0x1337dead);
+		s_nullb = true;
+		/* make sure that the write to s_nullb didn't smash the value after it */
+		if (s_struct1.i != 0x1337dead)
+			return 2;
 		return 0;
 	}
 
@@ -1667,8 +1727,109 @@ ncells ) {
 		var res = arm64_hfa_on_stack_inner (1, 2, 3, 4, 5, 6, 7, 8, s);
 		return res == 10.0 ? 0 : 1;
 	}
+
+	class MulOvfClass {
+		[MethodImplAttribute (MethodImplOptions.NoInlining)]
+		public unsafe void EncodeIntoBuffer(char* value, int valueLength, char* buffer, int bufferLength) {
+		}
+	}
+
+	static unsafe int test_0_mul_ovf_regress_36052 () {
+		var p = new MulOvfClass ();
+
+		string typeName = typeof(int).Name;
+		int bufferSize = 45;
+
+		fixed (char* value = typeName) {
+			char* buffer = stackalloc char[bufferSize];
+			p.EncodeIntoBuffer(value, typeName.Length, buffer, bufferSize);
+		}
+		return 0;
+	}
+
+	struct Struct16 {
+		public int a, b, c, d;
+	}
+
+	[MethodImplAttribute (MethodImplOptions.NoInlining)]
+	static int pass_struct16 (object o0, object o2, object o3, object o4, object o5, object o6, object o7, Struct16 o8) {
+		// This disables LLVM
+		try {
+		} catch {
+		}
+		return o8.a;
+	}
+
+	[MethodImplAttribute (MethodImplOptions.NoInlining)]
+	static int pass_struct16 (object o0, object o2, object o3, object o6, object o7, Struct16 o8) {
+		return pass_struct16 (o0, o2, null, o3, null, o6, o7, o8);
+	}
+
+	public static int test_42_pass_16byte_struct_split () {
+		return pass_struct16 (null, null, null, null, null, new Struct16 () { a = 42 });
+	}
+
+	public interface IComparer2
+	{
+		Type foo<T> ();
+	}
+
+	public class AClass : IComparer2 {
+		public Type foo<T> () {
+			return typeof(T);
+		}
+	}
+
+	public static int test_0_delegate_to_virtual_generic_on_ifaces () {
+		IComparer2 c = new AClass ();
+
+		Func<Type> f = c.foo<string>;
+		return f () == typeof(string) ? 0 : 1;
+	}
+
+	public enum ByteEnum2 : byte {
+		High = 142
+	}
+
+	[MethodImplAttribute (MethodImplOptions.NoInlining)]
+	public static int enum_arg_zero_extend (ByteEnum2 b) {
+		return (int)b;
+	}
+
+	public static int test_142_byte_enum_arg_zero_extend () {
+		return enum_arg_zero_extend (ByteEnum2.High);
+	}
+
+	enum Mine { One, Two }
+
+	public static int test_0_enum_gethashcode_opt () {
+		int sum = 0;
+        for (int i = 0; i < 1000000; ++i)
+			sum += Mine.Two.GetHashCode();
+
+        return 0;
+    }
+
+	public static int test_0_typedref () {
+		int i = 5;
+		System.TypedReference r = __makeref(i);
+		System.Type t = __reftype(r);
+
+		if (t != typeof (int))
+			return 1;
+		int j = __refvalue(r, int);
+		if (j != 5)
+			return 2;
+
+		try {
+			object o = __refvalue (r, object);
+		} catch (InvalidCastException) {
+		}
+
+		return 0;
+	}
 }
 
-#if MOBILE
+#if __MOBILE__
 }
 #endif

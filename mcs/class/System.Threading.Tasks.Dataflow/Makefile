@@ -4,10 +4,13 @@ include ../../build/rules.make
 
 LIBRARY = System.Threading.Tasks.Dataflow.dll
 
+LIB_REFS += System.Core System
+KEYFILE = ../ecma.pub
+LIB_MCS_FLAGS += -d:CONCURRENT_COLLECTIONS
+
 include ../../build/library.make
 
-LIB_REFS += System.Core System
-LIB_MCS_FLAGS += -r:$(corlib)
+TEST_MCS_FLAGS =
+TEST_LIB_REFS = System.Core System
 
-TEST_MCS_FLAGS = -r:System.Core.dll -r:System.dll
-
+EXTRA_DISTFILES=README.md

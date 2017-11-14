@@ -6,6 +6,7 @@
 //	Atsushi Enomoto (atsushi@ximian.com)
 //
 // Copyright (c) 2006-2007 Novell, Inc. (http://www.novell.com)
+// Copyright 2015 Xamarin Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining
 // a copy of this software and associated documentation files (the
@@ -26,6 +27,7 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //
+
 using System;
 using System.IO;
 using System.Text;
@@ -43,6 +45,7 @@ namespace System.Net.NetworkInformation {
 	[MonoTODO ("IPv6 support is missing")]
 	public class Ping : Component, IDisposable
 	{
+#if !MONOTOUCH
 		[StructLayout(LayoutKind.Sequential)]
 		struct cap_user_header_t
 		{
@@ -68,15 +71,15 @@ namespace System.Net.NetworkInformation {
 #endif
 		};
 		static readonly string PingBinPath;
+		static bool canSendPrivileged;
+#endif
 		const int default_timeout = 4000; // 4 sec.
 		ushort identifier;
 
-		// This value is correct as of Linux kernel version 2.6.25.9
-		// See /usr/include/linux/capability.h
-		const UInt32 linux_cap_version = 0x20071026;
+		// Request 32-bit capabilities by using version 1
+		const UInt32 _LINUX_CAPABILITY_VERSION_1 = 0x19980330;
 		
 		static readonly byte [] default_buffer = new byte [0];
-		static bool canSendPrivileged;
 		
 
 		BackgroundWorker worker;
@@ -84,7 +87,8 @@ namespace System.Net.NetworkInformation {
 		CancellationTokenSource cts;
 		
 		public event PingCompletedEventHandler PingCompleted;
-		
+
+#if !MONOTOUCH && !ORBIS
 		static Ping ()
 		{
 			if (Environment.OSVersion.Platform == PlatformID.Unix) {
@@ -106,6 +110,7 @@ namespace System.Net.NetworkInformation {
 			if (PingBinPath == null)
 				PingBinPath = "/bin/ping"; // default, fallback value
 		}
+#endif
 		
 		public Ping ()
 		{
@@ -115,7 +120,8 @@ namespace System.Net.NetworkInformation {
 			rng.GetBytes (randomIdentifier);
 			identifier = (ushort)(randomIdentifier [0] + (randomIdentifier [1] << 8));
 		}
-  
+
+#if !MONOTOUCH && !ORBIS
 		[DllImport ("libc", EntryPoint="capget")]
 		static extern int capget (ref cap_user_header_t header, ref cap_user_data_t data);
 
@@ -125,7 +131,7 @@ namespace System.Net.NetworkInformation {
 				cap_user_header_t header = new cap_user_header_t ();
 				cap_user_data_t data = new cap_user_data_t ();
 
-				header.version = linux_cap_version;
+				header.version = _LINUX_CAPABILITY_VERSION_1;
 
 				int ret = -1;
 
@@ -142,6 +148,7 @@ namespace System.Net.NetworkInformation {
 				canSendPrivileged = false;
 			}
 		}
+#endif
 		
 		void IDisposable.Dispose ()
 		{
@@ -151,7 +158,11 @@ namespace System.Net.NetworkInformation {
 		{
 			user_async_state = null;
 			worker = null;
-			cts = null;
+
+			if (cts != null) {
+				cts.Dispose();
+				cts = null;
+			}
 
 			if (PingCompleted != null)
 				PingCompleted (this, e);
@@ -195,14 +206,6 @@ namespace System.Net.NetworkInformation {
 			return Send (addresses [0], timeout, buffer, options);
 		}
 
-		static IPAddress GetNonLoopbackIP ()
-		{
-			foreach (IPAddress addr in Dns.GetHostByName (Dns.GetHostName ()).AddressList)
-				if (!IPAddress.IsLoopback (addr))
-					return addr;
-			throw new InvalidOperationException ("Could not resolve non-loopback IP address for localhost");
-		}
-
 		public PingReply Send (IPAddress address, int timeout, byte [] buffer, PingOptions options)
 		{
 			if (address == null)
@@ -215,16 +218,20 @@ namespace System.Net.NetworkInformation {
 				throw new ArgumentException ("buffer");
 			// options can be null.
 
+#if MONOTOUCH
+			throw new InvalidOperationException ();
+#else
 			if (canSendPrivileged)
 				return SendPrivileged (address, timeout, buffer, options);
 			return SendUnprivileged (address, timeout, buffer, options);
+#endif
 		}
 
+#if !MONOTOUCH
 		private PingReply SendPrivileged (IPAddress address, int timeout, byte [] buffer, PingOptions options)
 		{
 			IPEndPoint target = new IPEndPoint (address, 0);
-			IPEndPoint client = new IPEndPoint (GetNonLoopbackIP (), 0);
-
+			
 			// FIXME: support IPv6
 			using (Socket s = new Socket (AddressFamily.InterNetwork, SocketType.Raw, ProtocolType.Icmp)) {
 				if (options != null) {
@@ -239,23 +246,23 @@ namespace System.Net.NetworkInformation {
 				s.SendBufferSize = bytes.Length;
 				s.SendTo (bytes, bytes.Length, SocketFlags.None, target);
 
-				DateTime sentTime = DateTime.Now;
+				var sw = Stopwatch.StartNew ();
 
 				// receive
 				bytes = new byte [100];
 				do {
-					EndPoint endpoint = client;
-					int error = 0;
-					int rc = s.ReceiveFrom_nochecks_exc (bytes, 0, 100, SocketFlags.None,
-							ref endpoint, false, out error);
+					EndPoint endpoint = target;
+					SocketError error = 0;
+					int rc = s.ReceiveFrom (bytes, 0, 100, SocketFlags.None,
+							ref endpoint, out error);
 
-					if (error != 0) {
-						if (error == (int) SocketError.TimedOut) {
+					if (error != SocketError.Success) {
+						if (error == SocketError.TimedOut) {
 							return new PingReply (null, new byte [0], options, 0, IPStatus.TimedOut);
 						}
 						throw new NotSupportedException (String.Format ("Unexpected socket error during ping request: {0}", error));
 					}
-					long rtt = (long) (DateTime.Now - sentTime).TotalMilliseconds;
+					long rtt = (long) sw.ElapsedMilliseconds;
 					int headerLength = (bytes [0] & 0xF) << 2;
 					int bodyLength = rc - headerLength;
 
@@ -286,7 +293,8 @@ namespace System.Net.NetworkInformation {
 
 		private PingReply SendUnprivileged (IPAddress address, int timeout, byte [] buffer, PingOptions options)
 		{
-			DateTime sentTime = DateTime.UtcNow;
+#if MONO_FEATURE_PROCESS_START
+			var sw = Stopwatch.StartNew ();
 
 			Process ping = new Process ();
 			string args = BuildPingArgs (address, timeout, options);
@@ -310,7 +318,7 @@ namespace System.Net.NetworkInformation {
 				string stderr = ping.StandardError.ReadToEnd ();
 #pragma warning restore 219
 				
-				trip_time = (long) (DateTime.UtcNow - sentTime).TotalMilliseconds;
+				trip_time = (long) sw.ElapsedMilliseconds;
 				if (!ping.WaitForExit (timeout) || (ping.HasExited && ping.ExitCode == 2))
 					status = IPStatus.TimedOut;
 				else if (ping.ExitCode == 0)
@@ -325,7 +333,11 @@ namespace System.Net.NetworkInformation {
 			}
 
 			return new PingReply (address, buffer, options, trip_time, status);
+#else
+			throw new PlatformNotSupportedException ("Ping is not supported on this platform.");
+#endif // MONO_FEATURE_PROCESS_START
 		}
+#endif // !MONOTOUCH
 
 		// Async
 
@@ -401,6 +413,7 @@ namespace System.Net.NetworkInformation {
 			worker.CancelAsync ();
 		}
 
+#if !MONOTOUCH
 		// ICMP message
 
 		class IcmpMessage
@@ -534,6 +547,7 @@ namespace System.Net.NetworkInformation {
 
 			return args.ToString ();
 		}
+#endif // !MONOTOUCH
 
 		public Task<PingReply> SendPingAsync (IPAddress address, int timeout, byte [] buffer)
 		{
@@ -576,6 +590,8 @@ namespace System.Net.NetworkInformation {
 			if ((worker != null) || (cts != null))
 				throw new InvalidOperationException ("Another SendAsync operation is in progress");
 
+			cts = new CancellationTokenSource();
+
 			var task = Task<PingReply>.Factory.StartNew (
 				() => Send (address, timeout, buffer, options), cts.Token);
 
@@ -592,4 +608,3 @@ namespace System.Net.NetworkInformation {
 		}
 	}
 }
-

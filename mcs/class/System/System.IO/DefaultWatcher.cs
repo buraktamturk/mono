@@ -43,6 +43,8 @@ namespace System.IO {
 		public bool Enabled;
 		public bool NoWildcards;
 		public DateTime DisabledTime;
+
+		public object FilesLock = new object ();
 		public Hashtable Files;
 	}
 
@@ -125,7 +127,7 @@ namespace System.IO {
 				data = (DefaultWatcherData) watches [fsw];
 				if (data != null) {
 					data.Enabled = false;
-					data.DisabledTime = DateTime.Now;
+					data.DisabledTime = DateTime.UtcNow;
 				}
 			}
 		}
@@ -169,7 +171,7 @@ namespace System.IO {
 		{
 			if (!data.Enabled) {
 				return (data.DisabledTime != DateTime.MaxValue &&
-					(DateTime.Now - data.DisabledTime).TotalSeconds > 5);
+					(DateTime.UtcNow - data.DisabledTime).TotalSeconds > 5);
 			}
 
 			DoFiles (data, data.Directory, dispatch);
@@ -211,6 +213,13 @@ namespace System.IO {
 					files = NoStringsArray;
 			}
 
+			lock (data.FilesLock) {
+				IterateAndModifyFilesData (data, directory, dispatch, files);
+			}
+		}
+
+		void IterateAndModifyFilesData (DefaultWatcherData data, string directory, bool dispatch, string[] files)
+		{
 			/* Set all as untested */
 			foreach (string filename in data.Files.Keys) {
 				FileData fd = (FileData) data.Files [filename];

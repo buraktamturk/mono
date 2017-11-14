@@ -1,4 +1,5 @@
-/*
+/**
+ * \file
  * Author:
  *   Dietmar Maurer (dietmar@ximian.com)
  *
@@ -47,15 +48,29 @@ typedef enum {
 	MONO_AOT_MODE_NONE,
 	/* Enables normal AOT mode, equivalent to mono_jit_set_aot_only (false) */
 	MONO_AOT_MODE_NORMAL,
-	/* Enables hyrbid AOT mode, JIT can still be used for wrappers */
+	/* Enables hybrid AOT mode, JIT can still be used for wrappers */
 	MONO_AOT_MODE_HYBRID,
 	/* Enables full AOT mode, JIT is disabled and not allowed,
 	 * equivalent to mono_jit_set_aot_only (true) */
-	MONO_AOT_MODE_FULL
+	MONO_AOT_MODE_FULL,
+	/* Same as full, but use only llvm compiled code */
+	MONO_AOT_MODE_LLVMONLY,
+	/* Uses Interpreter, JIT is disabled and not allowed,
+	 * equivalent to "--full-aot --interpreter" */
+	MONO_AOT_MODE_INTERP,
+	/* Same as INTERP, but use only llvm compiled code */
+	MONO_AOT_MODE_INTERP_LLVMONLY,
 } MonoAotMode;
 
 MONO_API void
 mono_jit_set_aot_mode      (MonoAotMode mode);
+
+/*
+ * Returns whether the runtime was invoked for the purpose of AOT-compiling an
+ * assembly, i.e. no managed code will run.
+ */
+MONO_API mono_bool
+mono_jit_aot_compiling (void);
 
 /* Allow embedders to decide wherther to actually obey breakpoint instructions
  * in specific methods (works for both break IL instructions and Debugger.Break ()
@@ -80,14 +95,6 @@ MONO_API void
 mono_jit_parse_options     (int argc, char * argv[]);
 
 MONO_API char*       mono_get_runtime_build_info    (void);
-
-/* The following APIs are not stable. Avoid if possible. */
-
-MONO_API MonoJitInfo *
-mono_get_jit_info_from_method (MonoDomain *domain, MonoMethod *method);
-
-MONO_API void *
-mono_aot_get_method (MonoDomain *domain, MonoMethod *method);
 
 MONO_END_DECLS
 

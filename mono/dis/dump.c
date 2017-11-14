@@ -21,11 +21,6 @@
 #include "mono/metadata/class-internals.h"
 #include "mono/utils/mono-compiler.h"
 
-#if defined(__native_client__) && defined(__GLIBC__)
-volatile int __nacl_thread_suspension_needed = 0;
-void __nacl_suspend_thread_if_needed() {}
-#endif
-
 void
 dump_table_assembly (MonoImage *m)
 {
@@ -598,6 +593,12 @@ dump_table_method (MonoImage *m)
 		sigblob = mono_metadata_blob_heap (m, cols [MONO_METHOD_SIGNATURE]);
 		mono_metadata_decode_blob_size (sigblob, &sigblob);
 		method = mono_metadata_parse_method_signature_full (m, method_container ? method_container : type_container, i, sigblob, &sigblob, &error);
+		if (!mono_error_ok (&error)) {
+			fprintf (output,"%d: failed to parse due to %s\n", i, mono_error_get_message (&error));
+			mono_error_cleanup (&error);
+			continue;
+		}
+
 		g_assert (mono_error_ok (&error)); /*FIXME don't swallow the error message*/
 		sig = dis_stringify_method_signature (m, method, i, method_container ? method_container : type_container, FALSE);
                 impl_flags = get_method_impl_flags (cols [MONO_METHOD_IMPLFLAGS]);
@@ -661,14 +662,14 @@ dump_table_methodimpl (MonoImage *m)
 
 	for (i = 1; i <= t->rows; i++){
 		guint32 cols [MONO_METHODIMPL_SIZE];
-		char *class, *impl, *decl;
+		char *klass, *impl, *decl;
 
 		mono_metadata_decode_row (t, i - 1, cols, MONO_METHODIMPL_SIZE);
-		class = get_typedef (m, cols [MONO_METHODIMPL_CLASS]);
+		klass = get_typedef (m, cols [MONO_METHODIMPL_CLASS]);
 		impl = get_method (m, method_dor_to_token (cols [MONO_METHODIMPL_BODY]), NULL);
 		decl = get_method (m, method_dor_to_token (cols [MONO_METHODIMPL_DECLARATION]), NULL);
-		fprintf (output, "%d: %s\n\tdecl: %s\n\timpl: %s\n", i, class, decl, impl);
-		g_free (class);
+		fprintf (output, "%d: %s\n\tdecl: %s\n\timpl: %s\n", i, klass, decl, impl);
+		g_free (klass);
 		g_free (impl);
 		g_free (decl);
 	}
@@ -944,6 +945,7 @@ dump_table_customattr (MonoImage *m)
 
 	fprintf (output, "Custom Attributes Table (1..%d)\n", t->rows);
 	for (i = 1; i <= t->rows; i++) {
+		MonoError error;
 		guint32 cols [MONO_CUSTOM_ATTR_SIZE];
 		guint32 mtoken;
 		char * desc;
@@ -966,12 +968,18 @@ dump_table_customattr (MonoImage *m)
 			break;
 		}
 		method = get_method (m, mtoken, NULL);
-		meth = mono_get_method (m, mtoken, NULL);
-		params = custom_attr_params (m, mono_method_signature (meth), mono_metadata_blob_heap (m, cols [MONO_CUSTOM_ATTR_VALUE]));
-		fprintf (output, "%d: %s: %s [%s]\n", i, desc, method, params);
+		meth = mono_get_method_checked (m, mtoken, NULL, NULL, &error);
+		if (meth) {
+			params = custom_attr_params (m, mono_method_signature (meth), mono_metadata_blob_heap (m, cols [MONO_CUSTOM_ATTR_VALUE]));
+			fprintf (output, "%d: %s: %s [%s]\n", i, desc, method, params);
+			g_free (params);
+		} else {
+			fprintf (output, "Could not decode method due to %s", mono_error_get_message (&error));
+			mono_error_cleanup (&error);
+		}
+
 		g_free (desc);
 		g_free (method);
-		g_free (params);
 	}
 }
 

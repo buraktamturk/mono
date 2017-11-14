@@ -317,20 +317,20 @@ namespace Mono.CSharp
 			ig.BeginFinallyBlock ();
 		}
 
-		public void BeginScope ()
+		public void BeginScope (int scopeIndex)
 		{
 			if ((flags & Options.OmitDebugInfo) != 0)
 				return;
 
-			methodSymbols.StartBlock (CodeBlockEntry.Type.Lexical, ig.ILOffset);
+			methodSymbols.StartBlock (CodeBlockEntry.Type.Lexical, ig.ILOffset, scopeIndex);
 		}
 
-		public void BeginCompilerScope ()
+		public void BeginCompilerScope (int scopeIndex)
 		{
 			if ((flags & Options.OmitDebugInfo) != 0)
 				return;
 
-			methodSymbols.StartBlock (CodeBlockEntry.Type.CompilerGenerated, ig.ILOffset);
+			methodSymbols.StartBlock (CodeBlockEntry.Type.CompilerGenerated, ig.ILOffset, scopeIndex);
 		}
 
 		public void EndExceptionBlock ()
@@ -389,6 +389,22 @@ namespace Mono.CSharp
 		{
 			if (IsAnonymousStoreyMutateRequired)
 				type = CurrentAnonymousMethod.Storey.Mutator.Mutate (type);
+
+			if (pinned) {
+				//
+				// This is for .net compatibility. I am not sure why pinned
+				// pointer temps are converted to & even if they are pointers to
+				// pointers.
+				//
+				var pt = type as PointerContainer;
+				if (pt != null) {
+					type = pt.Element;
+					if (type.Kind == MemberKind.Void)
+						type = Module.Compiler.BuiltinTypes.IntPtr;
+					
+					return ig.DeclareLocal (type.GetMetaInfo ().MakeByRefType (), true);
+				}
+			}
 
 			return ig.DeclareLocal (type.GetMetaInfo (), pinned);
 		}
@@ -1054,7 +1070,10 @@ namespace Mono.CSharp
 					var ie = new InstanceEmitter (instance_copy, IsAddressCall (instance_copy, call_op, method.DeclaringType));
 
 					if (Arguments == null) {
-						ie.EmitLoad (ec, true);
+						if (ConditionalAccess)
+							ie.Emit (ec, true);
+						else
+							ie.EmitLoad (ec, true);
 					}
 				} else if (!InstanceExpressionOnStack) {
 					var ie = new InstanceEmitter (InstanceExpression, IsAddressCall (InstanceExpression, call_op, method.DeclaringType));
@@ -1228,7 +1247,7 @@ namespace Mono.CSharp
 					EmitLoad (ec, !conditionalAccess);
 
 					if (conditionalAccess) {
-						conditional_access_dup = !IsInexpensiveLoad ();
+						conditional_access_dup = !ExpressionAnalyzer.IsInexpensiveLoad (instance);
 						if (conditional_access_dup)
 							ec.Emit (OpCodes.Dup);
 					}
@@ -1247,10 +1266,15 @@ namespace Mono.CSharp
 
 			if (conditionalAccess) {
 				if (!ec.ConditionalAccess.Statement) {
-					if (ec.ConditionalAccess.Type.IsNullableType)
-						Nullable.LiftedNull.Create (ec.ConditionalAccess.Type, Location.Null).Emit (ec);
-					else
+					var t = ec.ConditionalAccess.Type;
+					if (t.IsNullableType)
+						Nullable.LiftedNull.Create (t, Location.Null).Emit (ec);
+					else {
 						ec.EmitNull ();
+
+						if (t.IsGenericParameter)
+							ec.Emit (OpCodes.Unbox_Any, t);
+					}
 				}
 
 				ec.Emit (OpCodes.Br, ec.ConditionalAccess.EndLabel);
@@ -1260,10 +1284,12 @@ namespace Mono.CSharp
 					instance_address.AddressOf (ec, AddressOp.Load);
 				} else if (unwrap != null) {
 					unwrap.Emit (ec);
-					var tmp = ec.GetTemporaryLocal (unwrap.Type);
-					ec.Emit (OpCodes.Stloc, tmp);
-					ec.Emit (OpCodes.Ldloca, tmp);
-					ec.FreeTemporaryLocal (tmp, unwrap.Type);
+					if (addressRequired) {
+						var tmp = ec.GetTemporaryLocal (unwrap.Type);
+						ec.Emit (OpCodes.Stloc, tmp);
+						ec.Emit (OpCodes.Ldloca, tmp);
+						ec.FreeTemporaryLocal (tmp, unwrap.Type);
+					}
 				} else if (!conditional_access_dup) {
 					instance.Emit (ec);
 				}
@@ -1301,7 +1327,7 @@ namespace Mono.CSharp
 			instance.Emit (ec);
 
 			// Only to make verifier happy
-			if (boxInstance && RequiresBoxing ()) {
+			if (boxInstance && ExpressionAnalyzer.RequiresBoxing (instance)) {
 				ec.Emit (OpCodes.Box, instance_type);
 			}
 		}
@@ -1319,7 +1345,12 @@ namespace Mono.CSharp
 			return instance_type;
 		}
 
-		bool RequiresBoxing ()
+
+	}
+
+	static class ExpressionAnalyzer
+	{
+		public static bool RequiresBoxing (Expression instance)
 		{
 			var instance_type = instance.Type;
 			if (instance_type.IsGenericParameter && !(instance is This) && TypeSpec.IsReferenceType (instance_type))
@@ -1334,12 +1365,12 @@ namespace Mono.CSharp
 		//
 		// Returns true for cheap race-free load, where we can avoid using dup
 		//
-		bool IsInexpensiveLoad ()
+		public static bool IsInexpensiveLoad (Expression instance)
 		{
 			if (instance is Constant)
 				return instance.IsSideEffectFree;
 
-			if (RequiresBoxing ())
+			if (RequiresBoxing (instance))
 				return false;
 
 			var vr = instance as VariableReference;

@@ -1,5 +1,6 @@
 //
 // Copyright 2011 Xamarin Inc (http://www.xamarin.com).
+// Licensed under the MIT license. See LICENSE file in the project root for full license information.
 //
 
 using System;
@@ -8,7 +9,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using System.Reflection.Emit;
 
-public class Tests {
+public unsafe class Tests {
 
 	public int int_field;
 
@@ -234,6 +235,9 @@ public class Tests {
 	[DllImport ("libtest", EntryPoint="mono_test_marshal_out_byref_array_out_size_param")]
 	public static extern int mono_test_marshal_out_byref_array_out_size_param ([Out] [MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 1)] out int [] a1, out int n);
 
+	[DllImport ("libtest", EntryPoint="mono_test_marshal_out_lparray_out_size_param")]
+	public static extern int mono_test_marshal_out_lparray_out_size_param ([Out] [MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 1)] int [] a1, out int n);
+
 	[DllImport ("libtest", EntryPoint="mono_test_marshal_inout_nonblittable_array", CharSet = CharSet.Unicode)]
 	public static extern int mono_test_marshal_inout_nonblittable_array ([In, Out] char [] a1);
 	
@@ -426,6 +430,22 @@ public class Tests {
 		int len;
 
 		int res = mono_test_marshal_out_byref_array_out_size_param (out a1, out len);
+		if (len != 4)
+			return 1;
+		for (int i = 0; i < len; i++)
+			if (a1 [i] != i)
+				return 2;
+		return 0;
+	}
+
+	public static int test_0_marshal_out_lparray_out_size_param () {
+		int [] a1 = null;
+		int len;
+
+		a1 = new int [10];
+		int res = mono_test_marshal_out_lparray_out_size_param (a1, out len);
+		// Check that a1 was not overwritten
+		a1.GetHashCode ();
 		if (len != 4)
 			return 1;
 		for (int i = 0; i < len; i++)
@@ -1413,6 +1433,13 @@ public class Tests {
 		return mono_test_stdcall_name_mangling (0, 1, 2) == 3 ? 0 : 1;
 	}
 
+	/* Test multiple calls to stdcall wrapper, xamarin bug 30146 */
+	public static int test_0_stdcall_many_calls () {
+		for (int i=0; i<256; i++)
+			mono_test_stdcall_name_mangling (0, 0, 0);
+		return 0;
+	}
+
 	/* Float test */
 
 	[DllImport ("libtest", EntryPoint="mono_test_marshal_pass_return_float")]
@@ -1876,6 +1903,89 @@ public class Tests {
 			return 1;
 		else
 			return 0;
+	}
+
+    [StructLayout(LayoutKind.Explicit, Size = 12)]
+	public struct FixedArrayStruct {
+        [FieldOffset(0)]
+        public fixed int array[3];
+	}
+
+	[DllImport ("libtest", EntryPoint="mono_test_marshal_fixed_array")]
+	public static extern int mono_test_marshal_fixed_array (FixedArrayStruct s);
+
+	public static unsafe int test_6_fixed_array_struct () {
+		var s = new FixedArrayStruct ();
+		s.array [0] = 1;
+		s.array [1] = 2;
+		s.array [2] = 3;
+
+		return mono_test_marshal_fixed_array (s);
+	}
+
+	[DllImport ("libtest", EntryPoint="mono_test_marshal_pointer_array")]
+	public static extern int mono_test_marshal_pointer_array (int*[] arr);
+
+	public static unsafe int test_0_pointer_array () {
+		var arr = new int [10];
+		for (int i = 0; i < arr.Length; i++)
+			arr [i] = -1;
+		var arr2 = new int*[10];
+		for (int i = 0; i < arr2.Length; i++) {
+			GCHandle handle = GCHandle.Alloc(arr[i], GCHandleType.Pinned);
+			fixed (int *ptr = &arr[i]) {
+				arr2[i] = ptr;
+			}
+		}
+		return mono_test_marshal_pointer_array (arr2);
+	}
+
+    [StructLayout(LayoutKind.Sequential)]
+	public struct FixedBufferChar {
+        public fixed char array[16];
+		public char c;
+	}
+
+	[DllImport ("libtest", EntryPoint="mono_test_marshal_fixed_buffer_char")]
+	public static extern int mono_test_marshal_fixed_buffer_char (ref FixedBufferChar s);
+
+	public static unsafe int test_0_fixed_buffer_char () {
+		var s = new FixedBufferChar ();
+		s.array [0] = 'A';
+		s.array [1] = 'B';
+		s.array [2] = 'C';
+		s.c = 'D';
+
+		int res = mono_test_marshal_fixed_buffer_char (ref s);
+		if (res != 0)
+			return 1;
+		if (s.array [0] != 'E' || s.array [1] != 'F' || s.c != 'G')
+			return 2;
+		return 0;
+	}
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+	public struct FixedBufferUnicode {
+        public fixed char array[16];
+		public char c;
+	}
+
+	[DllImport ("libtest", EntryPoint="mono_test_marshal_fixed_buffer_unicode")]
+	public static extern int mono_test_marshal_fixed_buffer_unicode (ref FixedBufferUnicode s);
+
+	public static unsafe int test_0_fixed_buffer_unicode () {
+		var s = new FixedBufferUnicode ();
+		s.array [0] = 'A';
+		s.array [1] = 'B';
+		s.array [2] = 'C';
+		s.c = 'D';
+
+		int res = mono_test_marshal_fixed_buffer_unicode (ref s);
+		if (res != 0)
+			return 1;
+		if (s.array [0] != 'E' || s.array [1] != 'F' || s.c != 'G')
+			return 2;
+		return 0;
 	}
 }
 

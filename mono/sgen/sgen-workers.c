@@ -1,22 +1,12 @@
-/*
- * sgen-workers.c: Worker threads for parallel and concurrent GC.
+/**
+ * \file
+ * Worker threads for parallel and concurrent GC.
  *
  * Copyright 2001-2003 Ximian, Inc
  * Copyright 2003-2010 Novell, Inc.
  * Copyright (C) 2012 Xamarin Inc
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License 2.0 as published by the Free Software Foundation;
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
- *
- * You should have received a copy of the GNU Library General Public
- * License 2.0 along with this library; if not, write to the Free
- * Software Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * Licensed under the MIT license. See LICENSE file in the project root for full license information.
  */
 
 #include "config.h"
@@ -30,21 +20,16 @@
 #include "mono/utils/mono-membar.h"
 #include "mono/sgen/sgen-client.h"
 
-static int workers_num;
-static WorkerData *workers_data;
-
-static SgenSectionGrayQueue workers_distribute_gray_queue;
-static gboolean workers_distribute_gray_queue_inited;
+static WorkerContext worker_contexts [GENERATION_MAX];
 
 /*
  * Allowed transitions:
  *
- * | from \ to          | NOT WORKING | WORKING | WORK ENQUEUED | NURSERY COLLECTION |
- * |--------------------+-------------+---------+---------------+--------------------|
- * | NOT WORKING        | -           | -       | main          | main               |
- * | WORKING            | worker      | -       | main          | main               |
- * | WORK ENQUEUED      | -           | worker  | -             | main               |
- * | NURSERY COLLECTION | -           | -       | main          | -                  |
+ * | from \ to          | NOT WORKING | WORKING | WORK ENQUEUED |
+ * |--------------------+-------------+---------+---------------+
+ * | NOT WORKING        | -           | -       | main / worker |
+ * | WORKING            | worker      | -       | main / worker |
+ * | WORK ENQUEUED      | -           | worker  | -             |
  *
  * The WORK ENQUEUED state guarantees that the worker thread will inspect the queue again at
  * least once.  Only after looking at the queue will it go back to WORKING, and then,
@@ -56,36 +41,23 @@ static gboolean workers_distribute_gray_queue_inited;
 enum {
 	STATE_NOT_WORKING,
 	STATE_WORKING,
-	STATE_WORK_ENQUEUED,
-	STATE_NURSERY_COLLECTION
+	STATE_WORK_ENQUEUED
 };
 
-typedef gint32 State;
-
-static volatile State workers_state;
-
-static SgenObjectOperations * volatile idle_func_object_ops;
+#define SGEN_WORKER_MIN_SECTIONS_SIGNAL 4
 
 static guint64 stat_workers_num_finished;
 
 static gboolean
-set_state (State old_state, State new_state)
+set_state (WorkerData *data, State old_state, State new_state)
 {
 	SGEN_ASSERT (0, old_state != new_state, "Why are we transitioning to the same state?");
 	if (new_state == STATE_NOT_WORKING)
 		SGEN_ASSERT (0, old_state == STATE_WORKING, "We can only transition to NOT WORKING from WORKING");
 	else if (new_state == STATE_WORKING)
 		SGEN_ASSERT (0, old_state == STATE_WORK_ENQUEUED, "We can only transition to WORKING from WORK ENQUEUED");
-	if (new_state == STATE_NOT_WORKING || new_state == STATE_WORKING)
-		SGEN_ASSERT (6, sgen_thread_pool_is_thread_pool_thread (mono_native_thread_id_get ()), "Only the worker thread is allowed to transition to NOT_WORKING or WORKING");
 
-	return InterlockedCompareExchange (&workers_state, new_state, old_state) == old_state;
-}
-
-static void
-assert_nursery_collection (State state)
-{
-	SGEN_ASSERT (0, state == STATE_NURSERY_COLLECTION, "Must be in the nursery collection state");
+	return mono_atomic_cas_i32 (&data->state, new_state, old_state) == old_state;
 }
 
 static gboolean
@@ -95,130 +67,174 @@ state_is_working_or_enqueued (State state)
 }
 
 static void
-workers_signal_enqueue_work (gboolean from_nursery_collection)
+sgen_workers_ensure_awake (WorkerContext *context)
 {
-	State old_state;
-	gboolean did_set_state;
+	int i;
+	gboolean need_signal = FALSE;
 
-	do {
-		old_state = workers_state;
+	/*
+	 * All workers are awaken, make sure we reset the parallel context.
+	 * We call this function only when starting the workers so nobody is running,
+	 * or when the last worker is enqueuing preclean work. In both cases we can't
+	 * have a worker working using a nopar context, which means it is safe.
+	 */
+	context->idle_func_object_ops = (context->active_workers_num > 1) ? context->idle_func_object_ops_par : context->idle_func_object_ops_nopar;
+	context->workers_finished = FALSE;
 
-		if (from_nursery_collection)
-			assert_nursery_collection (old_state);
-		else
-			SGEN_ASSERT (0, old_state != STATE_NURSERY_COLLECTION, "If we're not in a nursery collection, how come the state is NURSERY COLLECTION?");
+	for (i = 0; i < context->active_workers_num; i++) {
+		State old_state;
+		gboolean did_set_state;
 
-		if (old_state == STATE_WORK_ENQUEUED)
-			break;
+		do {
+			old_state = context->workers_data [i].state;
 
-		did_set_state = set_state (old_state, STATE_WORK_ENQUEUED);
-		if (from_nursery_collection)
-			SGEN_ASSERT (0, did_set_state, "Nobody else should be mutating the state");
-	} while (!did_set_state);
+			if (old_state == STATE_WORK_ENQUEUED)
+				break;
 
-	if (!state_is_working_or_enqueued (old_state))
-		sgen_thread_pool_idle_signal ();
-}
+			did_set_state = set_state (&context->workers_data [i], old_state, STATE_WORK_ENQUEUED);
 
-void
-sgen_workers_ensure_awake (void)
-{
-	SGEN_ASSERT (0, workers_state != STATE_NURSERY_COLLECTION, "Can't wake workers during nursery collection");
-	workers_signal_enqueue_work (FALSE);
+			if (did_set_state && old_state == STATE_NOT_WORKING)
+				context->workers_data [i].last_start = sgen_timestamp ();
+		} while (!did_set_state);
+
+		if (!state_is_working_or_enqueued (old_state))
+			need_signal = TRUE;
+	}
+
+	if (need_signal)
+		sgen_thread_pool_idle_signal (context->thread_pool_context);
 }
 
 static void
-worker_try_finish (void)
+worker_try_finish (WorkerData *data)
 {
 	State old_state;
+	int i, working = 0;
+	WorkerContext *context = data->context;
+	gint64 last_start = data->last_start;
 
 	++stat_workers_num_finished;
 
+	mono_os_mutex_lock (&context->finished_lock);
+
+	for (i = 0; i < context->active_workers_num; i++) {
+		if (state_is_working_or_enqueued (context->workers_data [i].state))
+			working++;
+	}
+
+	if (working == 1) {
+		SgenWorkersFinishCallback callback = context->finish_callback;
+		SGEN_ASSERT (0, context->idle_func_object_ops == context->idle_func_object_ops_nopar, "Why are we finishing with parallel context");
+		/* We are the last one left. Enqueue preclean job if we have one and awake everybody */
+		SGEN_ASSERT (0, data->state != STATE_NOT_WORKING, "How did we get from doing idle work to NOT WORKING without setting it ourselves?");
+		if (callback) {
+			context->finish_callback = NULL;
+			callback ();
+			context->worker_awakenings = 0;
+			/* Make sure each worker has a chance of seeing the enqueued jobs */
+			sgen_workers_ensure_awake (context);
+			SGEN_ASSERT (0, data->state == STATE_WORK_ENQUEUED, "Why did we fail to set our own state to ENQUEUED");
+
+			/*
+			 * Log to be able to get the duration of normal concurrent M&S phase.
+			 * Worker indexes are 1 based, since 0 is logically considered gc thread.
+			 */
+			binary_protocol_worker_finish_stats (data - &context->workers_data [0] + 1, context->generation, context->forced_stop, data->major_scan_time, data->los_scan_time, data->total_time + sgen_timestamp () - last_start);
+			goto work_available;
+		}
+	}
+
 	do {
-		old_state = workers_state;
+		old_state = data->state;
 
 		SGEN_ASSERT (0, old_state != STATE_NOT_WORKING, "How did we get from doing idle work to NOT WORKING without setting it ourselves?");
-		if (old_state == STATE_NURSERY_COLLECTION)
-			return;
 		if (old_state == STATE_WORK_ENQUEUED)
-			return;
+			goto work_available;
 		SGEN_ASSERT (0, old_state == STATE_WORKING, "What other possibility is there?");
+	} while (!set_state (data, old_state, STATE_NOT_WORKING));
 
-		/* We are the last thread to go to sleep. */
-	} while (!set_state (old_state, STATE_NOT_WORKING));
-}
+	/*
+	 * If we are second to last to finish, we set the scan context to the non-parallel
+	 * version so we can speed up the last worker. This helps us maintain same level
+	 * of performance as non-parallel mode even if we fail to distribute work properly.
+	 */
+	if (working == 2)
+		context->idle_func_object_ops = context->idle_func_object_ops_nopar;
 
-static gboolean
-collection_needs_workers (void)
-{
-	return sgen_collection_is_concurrent ();
+	context->workers_finished = TRUE;
+	mono_os_mutex_unlock (&context->finished_lock);
+
+	data->total_time += (sgen_timestamp () - last_start);
+	binary_protocol_worker_finish_stats (data - &context->workers_data [0] + 1, context->generation, context->forced_stop, data->major_scan_time, data->los_scan_time, data->total_time);
+
+	sgen_gray_object_queue_trim_free_list (&data->private_gray_queue);
+	return;
+
+work_available:
+	mono_os_mutex_unlock (&context->finished_lock);
 }
 
 void
-sgen_workers_enqueue_job (SgenThreadPoolJob *job)
+sgen_workers_enqueue_job (int generation, SgenThreadPoolJob *job, gboolean enqueue)
 {
-	if (!collection_needs_workers ()) {
+	if (!enqueue) {
 		job->func (NULL, job);
 		sgen_thread_pool_job_free (job);
 		return;
 	}
 
-	sgen_thread_pool_job_enqueue (job);
-}
-
-void
-sgen_workers_wait_for_jobs_finished (void)
-{
-	sgen_thread_pool_wait_for_all_jobs ();
-	/*
-	 * If the idle task was never triggered or it finished before the last job did and
-	 * then didn't get triggered again, we might end up in the situation of having
-	 * something in the gray queue yet the idle task not working.  The easiest way to
-	 * make sure this doesn't stay that way is to just trigger it again after all jobs
-	 * have finished.
-	 */
-	sgen_workers_ensure_awake ();
-}
-
-void
-sgen_workers_signal_start_nursery_collection_and_wait (void)
-{
-	State old_state;
-
-	do {
-		old_state = workers_state;
-
-		if (old_state != STATE_NOT_WORKING)
-			SGEN_ASSERT (0, old_state != STATE_NURSERY_COLLECTION, "Why are we transitioning to NURSERY COLLECTION when we're already there?");
-	} while (!set_state (old_state, STATE_NURSERY_COLLECTION));
-
-	sgen_thread_pool_idle_wait ();
-
-	assert_nursery_collection (workers_state);
-}
-
-void
-sgen_workers_signal_finish_nursery_collection (void)
-{
-	assert_nursery_collection (workers_state);
-	workers_signal_enqueue_work (TRUE);
+	sgen_thread_pool_job_enqueue (worker_contexts [generation].thread_pool_context, job);
 }
 
 static gboolean
 workers_get_work (WorkerData *data)
 {
-	SgenMajorCollector *major;
+	SgenMajorCollector *major = sgen_get_major_collector ();
+	SgenMinorCollector *minor = sgen_get_minor_collector ();
+	GrayQueueSection *section;
 
 	g_assert (sgen_gray_object_queue_is_empty (&data->private_gray_queue));
+	g_assert (major->is_concurrent || minor->is_parallel);
 
-	/* If we're concurrent, steal from the workers distribute gray queue. */
-	major = sgen_get_major_collector ();
-	if (major->is_concurrent) {
-		GrayQueueSection *section = sgen_section_gray_queue_dequeue (&workers_distribute_gray_queue);
-		if (section) {
-			sgen_gray_object_enqueue_section (&data->private_gray_queue, section);
-			return TRUE;
-		}
+	section = sgen_section_gray_queue_dequeue (&data->context->workers_distribute_gray_queue);
+	if (section) {
+		sgen_gray_object_enqueue_section (&data->private_gray_queue, section, major->is_parallel);
+		return TRUE;
+	}
+
+	/* Nobody to steal from */
+	g_assert (sgen_gray_object_queue_is_empty (&data->private_gray_queue));
+	return FALSE;
+}
+
+static gboolean
+workers_steal_work (WorkerData *data)
+{
+	SgenMajorCollector *major = sgen_get_major_collector ();
+	SgenMinorCollector *minor = sgen_get_minor_collector ();
+	int generation = sgen_get_current_collection_generation ();
+	GrayQueueSection *section = NULL;
+	WorkerContext *context = data->context;
+	int i, current_worker;
+
+	if ((generation == GENERATION_OLD && !major->is_parallel) ||
+			(generation == GENERATION_NURSERY && !minor->is_parallel))
+		return FALSE;
+
+	/* If we're parallel, steal from other workers' private gray queues  */
+	g_assert (sgen_gray_object_queue_is_empty (&data->private_gray_queue));
+
+	current_worker = (int) (data - context->workers_data);
+
+	for (i = 1; i < context->active_workers_num && !section; i++) {
+		int steal_worker = (current_worker + i) % context->active_workers_num;
+		if (state_is_working_or_enqueued (context->workers_data [steal_worker].state))
+			section = sgen_gray_object_steal_section (&context->workers_data [steal_worker].private_gray_queue);
+	}
+
+	if (section) {
+		sgen_gray_object_enqueue_section (&data->private_gray_queue, section, TRUE);
+		return TRUE;
 	}
 
 	/* Nobody to steal from */
@@ -238,163 +254,355 @@ static void
 init_private_gray_queue (WorkerData *data)
 {
 	sgen_gray_object_queue_init (&data->private_gray_queue,
-			sgen_get_major_collector ()->is_concurrent ? concurrent_enqueue_check : NULL);
+			sgen_get_major_collector ()->is_concurrent ? concurrent_enqueue_check : NULL,
+			FALSE);
 }
 
 static void
 thread_pool_init_func (void *data_untyped)
 {
-	WorkerData *data = data_untyped;
+	WorkerData *data = (WorkerData *)data_untyped;
 	SgenMajorCollector *major = sgen_get_major_collector ();
+	SgenMinorCollector *minor = sgen_get_minor_collector ();
 
-	sgen_client_thread_register_worker ();
-
-	if (!major->is_concurrent)
+	if (!major->is_concurrent && !minor->is_parallel)
 		return;
 
 	init_private_gray_queue (data);
+
+	/* Separate WorkerData for same thread share free_block_lists */
+	if (major->is_parallel || minor->is_parallel)
+		major->init_block_free_lists (&data->free_block_lists);
 }
 
 static gboolean
-continue_idle_func (void)
+sgen_workers_are_working (WorkerContext *context)
 {
-	return state_is_working_or_enqueued (workers_state);
+	int i;
+
+	for (i = 0; i < context->active_workers_num; i++) {
+		if (state_is_working_or_enqueued (context->workers_data [i].state))
+			return TRUE;
+	}
+	return FALSE;
+}
+
+static gboolean
+continue_idle_func (void *data_untyped, int thread_pool_context)
+{
+	if (data_untyped)
+		return state_is_working_or_enqueued (((WorkerData*)data_untyped)->state);
+
+	/* Return if any of the threads is working in the context */
+	if (worker_contexts [GENERATION_NURSERY].workers_num && worker_contexts [GENERATION_NURSERY].thread_pool_context == thread_pool_context)
+		return sgen_workers_are_working (&worker_contexts [GENERATION_NURSERY]);
+	if (worker_contexts [GENERATION_OLD].workers_num && worker_contexts [GENERATION_OLD].thread_pool_context == thread_pool_context)
+		return sgen_workers_are_working (&worker_contexts [GENERATION_OLD]);
+
+	g_assert_not_reached ();
+	return FALSE;
+}
+
+static gboolean
+should_work_func (void *data_untyped)
+{
+	WorkerData *data = (WorkerData*)data_untyped;
+	WorkerContext *context = data->context;
+	int current_worker = (int) (data - context->workers_data);
+
+	return context->started && current_worker < context->active_workers_num && state_is_working_or_enqueued (data->state);
 }
 
 static void
 marker_idle_func (void *data_untyped)
 {
-	WorkerData *data = data_untyped;
+	WorkerData *data = (WorkerData *)data_untyped;
+	WorkerContext *context = data->context;
 
-	if (!continue_idle_func ())
-		return;
+	SGEN_ASSERT (0, continue_idle_func (data_untyped, context->thread_pool_context), "Why are we called when we're not supposed to work?");
 
-	SGEN_ASSERT (0, sgen_concurrent_collection_in_progress (), "The worker should only mark in concurrent collections.");
-	SGEN_ASSERT (0, sgen_get_current_collection_generation () != GENERATION_NURSERY, "Why are we doing work while there's a nursery collection happening?");
-
-	if (workers_state == STATE_WORK_ENQUEUED) {
-		set_state (STATE_WORK_ENQUEUED, STATE_WORKING);
-		SGEN_ASSERT (0, workers_state != STATE_NOT_WORKING, "How did we get from WORK ENQUEUED to NOT WORKING?");
+	if (data->state == STATE_WORK_ENQUEUED) {
+		set_state (data, STATE_WORK_ENQUEUED, STATE_WORKING);
+		SGEN_ASSERT (0, data->state != STATE_NOT_WORKING, "How did we get from WORK ENQUEUED to NOT WORKING?");
 	}
 
-	if (!sgen_gray_object_queue_is_empty (&data->private_gray_queue) || workers_get_work (data)) {
-		ScanCopyContext ctx = CONTEXT_FROM_OBJECT_OPERATIONS (idle_func_object_ops, &data->private_gray_queue);
+	if (!context->forced_stop && (!sgen_gray_object_queue_is_empty (&data->private_gray_queue) || workers_get_work (data) || workers_steal_work (data))) {
+		ScanCopyContext ctx = CONTEXT_FROM_OBJECT_OPERATIONS (context->idle_func_object_ops, &data->private_gray_queue);
 
 		SGEN_ASSERT (0, !sgen_gray_object_queue_is_empty (&data->private_gray_queue), "How is our gray queue empty if we just got work?");
 
-		sgen_drain_gray_stack (32, ctx);
+		sgen_drain_gray_stack (ctx);
+
+		if (data->private_gray_queue.num_sections >= SGEN_WORKER_MIN_SECTIONS_SIGNAL
+				&& context->workers_finished && context->worker_awakenings < context->active_workers_num) {
+			/* We bound the number of worker awakenings just to be sure */
+			context->worker_awakenings++;
+			mono_os_mutex_lock (&context->finished_lock);
+			sgen_workers_ensure_awake (context);
+			mono_os_mutex_unlock (&context->finished_lock);
+		}
 	} else {
-		worker_try_finish ();
+		worker_try_finish (data);
 	}
 }
 
 static void
-init_distribute_gray_queue (void)
+init_distribute_gray_queue (WorkerContext *context)
 {
-	if (workers_distribute_gray_queue_inited) {
-		g_assert (sgen_section_gray_queue_is_empty (&workers_distribute_gray_queue));
-		g_assert (workers_distribute_gray_queue.locked);
-		return;
-	}
-
-	sgen_section_gray_queue_init (&workers_distribute_gray_queue, TRUE,
+	sgen_section_gray_queue_init (&context->workers_distribute_gray_queue, TRUE,
 			sgen_get_major_collector ()->is_concurrent ? concurrent_enqueue_check : NULL);
-	workers_distribute_gray_queue_inited = TRUE;
 }
 
 void
-sgen_workers_init_distribute_gray_queue (void)
+sgen_workers_create_context (int generation, int num_workers)
 {
-	SGEN_ASSERT (0, sgen_get_major_collector ()->is_concurrent && collection_needs_workers (),
-			"Why should we init the distribute gray queue if we don't need it?");
-	init_distribute_gray_queue ();
-}
-
-void
-sgen_workers_init (int num_workers)
-{
+	static gboolean stat_inited = FALSE;
 	int i;
-	void **workers_data_ptrs = alloca(num_workers * sizeof(void *));
+	WorkerData **workers_data_ptrs = (WorkerData**)sgen_alloc_internal_dynamic (num_workers * sizeof(WorkerData*), INTERNAL_MEM_WORKER_DATA, TRUE);
+	WorkerContext *context = &worker_contexts [generation];
 
-	if (!sgen_get_major_collector ()->is_concurrent) {
-		sgen_thread_pool_init (num_workers, thread_pool_init_func, NULL, NULL, NULL);
-		return;
+	SGEN_ASSERT (0, !context->workers_num, "We can't init the worker context for a generation twice");
+
+	mono_os_mutex_init (&context->finished_lock);
+
+	context->generation = generation;
+	context->workers_num = num_workers;
+	context->active_workers_num = num_workers;
+
+	context->workers_data = (WorkerData *)sgen_alloc_internal_dynamic (sizeof (WorkerData) * num_workers, INTERNAL_MEM_WORKER_DATA, TRUE);
+	memset (context->workers_data, 0, sizeof (WorkerData) * num_workers);
+
+	init_distribute_gray_queue (context);
+
+	for (i = 0; i < num_workers; ++i) {
+		workers_data_ptrs [i] = &context->workers_data [i];
+		context->workers_data [i].context = context;
 	}
 
-	//g_print ("initing %d workers\n", num_workers);
+	context->thread_pool_context = sgen_thread_pool_create_context (num_workers, thread_pool_init_func, marker_idle_func, continue_idle_func, should_work_func, (void**)workers_data_ptrs);
 
-	workers_num = num_workers;
+	if (!stat_inited) {
+		mono_counters_register ("# workers finished", MONO_COUNTER_GC | MONO_COUNTER_ULONG, &stat_workers_num_finished);
+		stat_inited = TRUE;
+	}
+}
 
-	workers_data = sgen_alloc_internal_dynamic (sizeof (WorkerData) * num_workers, INTERNAL_MEM_WORKER_DATA, TRUE);
-	memset (workers_data, 0, sizeof (WorkerData) * num_workers);
+/* This is called with thread pool lock so no context switch can happen */
+static gboolean
+continue_idle_wait (int calling_context, int *threads_context)
+{
+	WorkerContext *context;
+	int i;
 
-	init_distribute_gray_queue ();
+	if (worker_contexts [GENERATION_OLD].workers_num && calling_context == worker_contexts [GENERATION_OLD].thread_pool_context)
+		context = &worker_contexts [GENERATION_OLD];
+	else if (worker_contexts [GENERATION_NURSERY].workers_num && calling_context == worker_contexts [GENERATION_NURSERY].thread_pool_context)
+		context = &worker_contexts [GENERATION_NURSERY];
+	else
+		g_assert_not_reached ();
 
-	for (i = 0; i < workers_num; ++i)
-		workers_data_ptrs [i] = (void *) &workers_data [i];
+	/*
+	 * We assume there are no pending jobs, since this is called only after
+	 * we waited for all the jobs.
+	 */
+	for (i = 0; i < context->active_workers_num; i++) {
+		if (threads_context [i] == calling_context)
+			return TRUE;
+	}
 
-	sgen_thread_pool_init (num_workers, thread_pool_init_func, marker_idle_func, continue_idle_func, workers_data_ptrs);
+	if (sgen_workers_have_idle_work (context->generation) && !context->forced_stop)
+		return TRUE;
 
-	mono_counters_register ("# workers finished", MONO_COUNTER_GC | MONO_COUNTER_ULONG, &stat_workers_num_finished);
+	/*
+	 * At this point there are no jobs to be done, and no objects to be scanned
+	 * in the gray queues. We can simply asynchronously finish all the workers
+	 * from the context that were not finished already (due to being stuck working
+	 * in another context)
+	 */
+
+	for (i = 0; i < context->active_workers_num; i++) {
+		if (context->workers_data [i].state == STATE_WORK_ENQUEUED)
+			set_state (&context->workers_data [i], STATE_WORK_ENQUEUED, STATE_WORKING);
+		if (context->workers_data [i].state == STATE_WORKING)
+			worker_try_finish (&context->workers_data [i]);
+	}
+
+	return FALSE;
+}
+
+
+void
+sgen_workers_stop_all_workers (int generation)
+{
+	WorkerContext *context = &worker_contexts [generation];
+
+	mono_os_mutex_lock (&context->finished_lock);
+	context->finish_callback = NULL;
+	mono_os_mutex_unlock (&context->finished_lock);
+
+	context->forced_stop = TRUE;
+
+	sgen_thread_pool_wait_for_all_jobs (context->thread_pool_context);
+	sgen_thread_pool_idle_wait (context->thread_pool_context, continue_idle_wait);
+	SGEN_ASSERT (0, !sgen_workers_are_working (context), "Can only signal enqueue work when in no work state");
+
+	context->started = FALSE;
 }
 
 void
-sgen_workers_start_all_workers (SgenObjectOperations *object_ops)
+sgen_workers_set_num_active_workers (int generation, int num_workers)
 {
-	if (!collection_needs_workers ())
-		return;
+	WorkerContext *context = &worker_contexts [generation];
+	if (num_workers) {
+		SGEN_ASSERT (0, num_workers <= context->workers_num, "We can't start more workers than we initialized");
+		context->active_workers_num = num_workers;
+	} else {
+		context->active_workers_num = context->workers_num;
+	}
+}
 
-	idle_func_object_ops = object_ops;
+void
+sgen_workers_start_all_workers (int generation, SgenObjectOperations *object_ops_nopar, SgenObjectOperations *object_ops_par, SgenWorkersFinishCallback callback)
+{
+	WorkerContext *context = &worker_contexts [generation];
+	int i;
+	SGEN_ASSERT (0, !context->started, "Why are we starting to work without finishing previous cycle");
+
+	context->idle_func_object_ops_par = object_ops_par;
+	context->idle_func_object_ops_nopar = object_ops_nopar;
+	context->forced_stop = FALSE;
+	context->finish_callback = callback;
+	context->worker_awakenings = 0;
+	context->started = TRUE;
+
+	for (i = 0; i < context->active_workers_num; i++) {
+		context->workers_data [i].major_scan_time = 0;
+		context->workers_data [i].los_scan_time = 0;
+		context->workers_data [i].total_time = 0;
+		context->workers_data [i].last_start = 0;
+	}
 	mono_memory_write_barrier ();
 
-	workers_signal_enqueue_work (FALSE);
+	/*
+	 * We expect workers to start finishing only after all of them were awaken.
+	 * Otherwise we might think that we have fewer workers and use wrong context.
+	 */
+	mono_os_mutex_lock (&context->finished_lock);
+	sgen_workers_ensure_awake (context);
+	mono_os_mutex_unlock (&context->finished_lock);
 }
 
 void
-sgen_workers_join (void)
+sgen_workers_join (int generation)
 {
+	WorkerContext *context = &worker_contexts [generation];
 	int i;
 
-	SGEN_ASSERT (0, workers_state != STATE_NURSERY_COLLECTION, "Can't be in nursery collection when joining");
+	SGEN_ASSERT (0, !context->finish_callback, "Why are we joining concurrent mark early");
 
-	if (!collection_needs_workers ())
-		return;
-
-	sgen_thread_pool_wait_for_all_jobs ();
-	sgen_thread_pool_idle_wait ();
-	SGEN_ASSERT (0, workers_state == STATE_NOT_WORKING, "Can only signal enqueue work when in no work state");
+	sgen_thread_pool_wait_for_all_jobs (context->thread_pool_context);
+	sgen_thread_pool_idle_wait (context->thread_pool_context, continue_idle_wait);
+	SGEN_ASSERT (0, !sgen_workers_are_working (context), "Can only signal enqueue work when in no work state");
 
 	/* At this point all the workers have stopped. */
 
-	SGEN_ASSERT (0, sgen_section_gray_queue_is_empty (&workers_distribute_gray_queue), "Why is there still work left to do?");
-	for (i = 0; i < workers_num; ++i)
-		SGEN_ASSERT (0, sgen_gray_object_queue_is_empty (&workers_data [i].private_gray_queue), "Why is there still work left to do?");
+	SGEN_ASSERT (0, sgen_section_gray_queue_is_empty (&context->workers_distribute_gray_queue), "Why is there still work left to do?");
+	for (i = 0; i < context->active_workers_num; ++i)
+		SGEN_ASSERT (0, sgen_gray_object_queue_is_empty (&context->workers_data [i].private_gray_queue), "Why is there still work left to do?");
+
+	context->started = FALSE;
+}
+
+/*
+ * Can only be called if the workers are not working in the
+ * context and there are no pending jobs.
+ */
+gboolean
+sgen_workers_have_idle_work (int generation)
+{
+	WorkerContext *context = &worker_contexts [generation];
+	int i;
+
+	if (!sgen_section_gray_queue_is_empty (&context->workers_distribute_gray_queue))
+		return TRUE;
+
+	for (i = 0; i < context->active_workers_num; ++i) {
+		if (!sgen_gray_object_queue_is_empty (&context->workers_data [i].private_gray_queue))
+			return TRUE;
+	}
+
+	return FALSE;
 }
 
 gboolean
 sgen_workers_all_done (void)
 {
-	return workers_state == STATE_NOT_WORKING;
-}
+	if (worker_contexts [GENERATION_NURSERY].workers_num && sgen_workers_are_working (&worker_contexts [GENERATION_NURSERY]))
+		return FALSE;
+	if (worker_contexts [GENERATION_OLD].workers_num && sgen_workers_are_working (&worker_contexts [GENERATION_OLD]))
+		return FALSE;
 
-/* Must only be used for debugging */
-gboolean
-sgen_workers_are_working (void)
-{
-	return state_is_working_or_enqueued (workers_state);
+	return TRUE;
 }
 
 void
-sgen_workers_wait (void)
+sgen_workers_assert_gray_queue_is_empty (int generation)
 {
-	sgen_thread_pool_idle_wait ();
-	SGEN_ASSERT (0, sgen_workers_all_done (), "Why are the workers not done after we wait for them?");
+	SGEN_ASSERT (0, sgen_section_gray_queue_is_empty (&worker_contexts [generation].workers_distribute_gray_queue), "Why is the workers gray queue not empty?");
 }
 
-SgenSectionGrayQueue*
-sgen_workers_get_distribute_section_gray_queue (void)
+void
+sgen_workers_take_from_queue (int generation, SgenGrayQueue *queue)
 {
-	return &workers_distribute_gray_queue;
+	WorkerContext *context = &worker_contexts [generation];
+
+	sgen_gray_object_spread (queue, sgen_workers_get_job_split_count (generation));
+
+	for (;;) {
+		GrayQueueSection *section = sgen_gray_object_dequeue_section (queue);
+		if (!section)
+			break;
+		sgen_section_gray_queue_enqueue (&context->workers_distribute_gray_queue, section);
+	}
+
+	SGEN_ASSERT (0, !sgen_workers_are_working (context), "We should fully populate the distribute gray queue before we start the workers");
+}
+
+SgenObjectOperations*
+sgen_workers_get_idle_func_object_ops (WorkerData *worker)
+{
+	g_assert (worker->context->idle_func_object_ops);
+	return worker->context->idle_func_object_ops;
+}
+
+/*
+ * If we have a single worker, splitting into multiple jobs makes no sense. With
+ * more than one worker, we split into a larger number of jobs so that, in case
+ * the work load is uneven, a worker that finished quickly can take up more jobs
+ * than another one.
+ *
+ * We also return 1 if there is no worker context for that generation.
+ */
+int
+sgen_workers_get_job_split_count (int generation)
+{
+	return (worker_contexts [generation].active_workers_num > 1) ? worker_contexts [generation].active_workers_num * 4 : 1;
+}
+
+void
+sgen_workers_foreach (int generation, SgenWorkerCallback callback)
+{
+	WorkerContext *context = &worker_contexts [generation];
+	int i;
+
+	for (i = 0; i < context->workers_num; i++)
+		callback (&context->workers_data [i]);
+}
+
+gboolean
+sgen_workers_is_worker_thread (MonoNativeThreadId id)
+{
+	return sgen_thread_pool_is_thread_pool_thread (id);
 }
 
 #endif

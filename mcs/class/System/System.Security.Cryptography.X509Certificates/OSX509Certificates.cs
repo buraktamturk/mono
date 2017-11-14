@@ -22,15 +22,9 @@
 //
 #if SECURITY_DEP
 
-#if MONOTOUCH || MONODROID
-using MSX = Mono.Security.X509;
-#else
-extern alias MonoSecurity;
-using MSX = MonoSecurity::Mono.Security.X509;
-#endif
-
 using System;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography.X509Certificates;
 
 namespace System.Security.Cryptography.X509Certificates {
 
@@ -45,6 +39,9 @@ namespace System.Security.Cryptography.X509Certificates {
 		extern static /* OSStatus */ int SecTrustCreateWithCertificates (IntPtr certOrCertArray, IntPtr policies, out IntPtr sectrustref);
 		
 		[DllImport (SecurityLibrary)]
+		extern static /* OSStatus */ int SecTrustSetAnchorCertificates (IntPtr /* SecTrustRef */ trust, IntPtr /* CFArrayRef */ anchorCertificates);
+
+		[DllImport (SecurityLibrary)]
 		extern static IntPtr SecPolicyCreateSSL ([MarshalAs (UnmanagedType.I1)] bool server, IntPtr cfStringHostname);
 		
 		[DllImport (SecurityLibrary)]
@@ -55,6 +52,9 @@ namespace System.Security.Cryptography.X509Certificates {
 
 		[DllImport (CoreFoundationLibrary)]
 		unsafe extern static IntPtr CFDataCreate (IntPtr allocator, byte *bytes, /* CFIndex */ IntPtr length);
+
+		[DllImport (CoreFoundationLibrary)]
+		extern static void CFRetain (IntPtr handle);
 
 		[DllImport (CoreFoundationLibrary)]
 		extern static void CFRelease (IntPtr handle);
@@ -92,58 +92,89 @@ namespace System.Security.Cryptography.X509Certificates {
 					IntPtr.Zero);
 			}
 		}
+
+		static IntPtr GetCertificate (X509Certificate certificate)
+		{
+			var handle = certificate.Impl.GetNativeAppleCertificate ();
+			if (handle != IntPtr.Zero) {
+				CFRetain (handle);
+				return handle;
+			}
+			var dataPtr = MakeCFData (certificate.GetRawCertData ());
+			handle = SecCertificateCreateWithData (IntPtr.Zero, dataPtr);
+			CFRelease (dataPtr);
+			return handle;
+		}
 		
-		public static SecTrustResult TrustEvaluateSsl (MSX.X509CertificateCollection certificates, string host)
+		public static SecTrustResult TrustEvaluateSsl (X509CertificateCollection certificates, X509CertificateCollection anchors, string host)
 		{
 			if (certificates == null)
 				return SecTrustResult.Deny;
 
 			try {
-				return _TrustEvaluateSsl (certificates, host);
+				return _TrustEvaluateSsl (certificates, anchors, host);
 			} catch {
 				return SecTrustResult.Deny;
 			}
 		}
-		
-		static SecTrustResult _TrustEvaluateSsl (MSX.X509CertificateCollection certificates, string hostName)
+
+		static SecTrustResult _TrustEvaluateSsl (X509CertificateCollection certificates, X509CertificateCollection anchors, string hostName)
 		{
 			int certCount = certificates.Count;
-			IntPtr [] cfDataPtrs = new IntPtr [certCount];
+			int anchorCount = anchors != null ? anchors.Count : 0;
 			IntPtr [] secCerts = new IntPtr [certCount];
+			IntPtr [] secCertAnchors = new IntPtr [anchorCount];
 			IntPtr certArray = IntPtr.Zero;
+			IntPtr anchorArray = IntPtr.Zero;
 			IntPtr sslsecpolicy = IntPtr.Zero;
 			IntPtr host = IntPtr.Zero;
 			IntPtr sectrust = IntPtr.Zero;
 			SecTrustResult result = SecTrustResult.Deny;
 
 			try {
-				for (int i = 0; i < certCount; i++)
-					cfDataPtrs [i] = MakeCFData (certificates [i].RawData);
-				
-				for (int i = 0; i < certCount; i++){
-					secCerts [i] = SecCertificateCreateWithData (IntPtr.Zero, cfDataPtrs [i]);
+				for (int i = 0; i < certCount; i++) {
+					secCerts [i] = GetCertificate (certificates [i]);
 					if (secCerts [i] == IntPtr.Zero)
 						return SecTrustResult.Deny;
 				}
+
+				for (int i = 0; i < anchorCount; i++) {
+					secCertAnchors [i] = GetCertificate (anchors [i]);
+					if (secCertAnchors [i] == IntPtr.Zero)
+						return SecTrustResult.Deny;
+				}
+
 				certArray = FromIntPtrs (secCerts);
-				host = CFStringCreateWithCharacters (IntPtr.Zero, hostName, (IntPtr) hostName.Length);
+
+				if (hostName != null)
+					host = CFStringCreateWithCharacters (IntPtr.Zero, hostName, (IntPtr) hostName.Length);
 				sslsecpolicy = SecPolicyCreateSSL (true, host);
 
 				int code = SecTrustCreateWithCertificates (certArray, sslsecpolicy, out sectrust);
-				if (code == 0)
-					code = SecTrustEvaluate (sectrust, out result);
+				if (code != 0)
+					return SecTrustResult.Deny;
+
+				if (anchorCount > 0) {
+					anchorArray = FromIntPtrs (secCertAnchors);
+					SecTrustSetAnchorCertificates (sectrust, anchorArray);
+				}
+
+				code = SecTrustEvaluate (sectrust, out result);
 				return result;
 			} finally {
-				for (int i = 0; i < certCount; i++)
-					if (cfDataPtrs [i] != IntPtr.Zero)
-						CFRelease (cfDataPtrs [i]);
-
 				if (certArray != IntPtr.Zero)
 					CFRelease (certArray);
+
+				if (anchorArray != IntPtr.Zero)
+					CFRelease (anchorArray);
 				
 				for (int i = 0; i < certCount; i++)
 					if (secCerts [i] != IntPtr.Zero)
 						CFRelease (secCerts [i]);
+
+				for (int i = 0; i < anchorCount; i++)
+					if (secCertAnchors [i] != IntPtr.Zero)
+						CFRelease (secCertAnchors [i]);
 
 				if (sslsecpolicy != IntPtr.Zero)
 					CFRelease (sslsecpolicy);

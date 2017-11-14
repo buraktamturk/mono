@@ -23,14 +23,14 @@ using System.Reflection;
  * the IL code looks.
  */
 
-#if MOBILE
+#if __MOBILE__
 class MathTests
 #else
 class Tests
 #endif
 {
 
-#if !MOBILE
+#if !__MOBILE__
 	public static int Main (string[] args) {
 		return TestDriver.RunTests (typeof (Tests), args);
 	}
@@ -253,6 +253,14 @@ class Tests
 		double d = -5.0;
 
 		if (Math.Abs (d) != 5.0)
+			return 1;
+		return 0;
+	}
+
+	public static int test_0_float_abs () {
+		float f = -1.0f;
+
+		if (Math.Abs (f) != 1.0f)
 			return 1;
 		return 0;
 	}

@@ -160,11 +160,14 @@ namespace System.Diagnostics {
 		public override void Fail (string message, string detailMessage)
 		{
 			base.Fail (message, detailMessage);
+#if !MOBILE
 			if (ProcessUI (message, detailMessage) == DialogResult.Abort)
 				Thread.CurrentThread.Abort ();
+#endif
 			WriteLine (new StackTrace().ToString());
 		}
 
+#if !MOBILE
 		DialogResult ProcessUI (string message, string detailMessage)
 		{
 			
@@ -210,6 +213,7 @@ namespace System.Diagnostics {
 			Ignore,
 			Abort
 		}
+#endif
 
 		[MethodImplAttribute(MethodImplOptions.InternalCall)]
 		private extern static void WriteWindowsDebugString (string message);
@@ -251,10 +255,10 @@ namespace System.Diagnostics {
 				WritePrefix ();
 			}
 
-			WriteDebugString (message);
-
 			if (Debugger.IsLogging())
 				Debugger.Log (0, null, message);
+			else
+				WriteDebugString (message);
 
 			WriteLogFile (message, LogFileName);
 		}

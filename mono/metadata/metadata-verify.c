@@ -1,17 +1,21 @@
-/*
- * metadata-verify.c: Metadata verfication support
+/**
+ * \file
+ * Metadata verfication support
  *
  * Author:
  *	Mono Project (http://www.mono-project.com)
  *
  * Copyright (C) 2005-2008 Novell, Inc. (http://www.novell.com)
+ * Licensed under the MIT license. See LICENSE file in the project root for full license information.
  */
+#include <config.h>
 #include <mono/metadata/object-internals.h>
 #include <mono/metadata/verify.h>
 #include <mono/metadata/verify-internals.h>
 #include <mono/metadata/opcodes.h>
 #include <mono/metadata/tabledefs.h>
 #include <mono/metadata/reflection.h>
+#include <mono/metadata/reflection-internals.h>
 #include <mono/metadata/debug-helpers.h>
 #include <mono/metadata/mono-endian.h>
 #include <mono/metadata/metadata.h>
@@ -332,7 +336,7 @@ bounds_check_virtual_address (VerifyContext *ctx, guint32 rva, guint32 size)
 		return FALSE;
 
 	if (ctx->stage > STAGE_PE) {
-		MonoCLIImageInfo *iinfo = ctx->image->image_info;
+		MonoCLIImageInfo *iinfo = (MonoCLIImageInfo *)ctx->image->image_info;
 		const int top = iinfo->cli_section_count;
 		MonoSectionTable *tables = iinfo->cli_section_tables;
 		int i;
@@ -689,7 +693,7 @@ verify_resources_table (VerifyContext *ctx)
 static DataDirectory
 get_data_dir (VerifyContext *ctx, int idx)
 {
-	MonoCLIImageInfo *iinfo = ctx->image->image_info;
+	MonoCLIImageInfo *iinfo = (MonoCLIImageInfo *)ctx->image->image_info;
 	MonoPEDirEntry *entry= &iinfo->cli_header.datadir.pe_export_table;
 	DataDirectory res;
 
@@ -729,7 +733,7 @@ verify_cli_header (VerifyContext *ctx)
 	if (!read32 (ptr + 8) || !read32 (ptr + 12))
 		ADD_ERROR (ctx, g_strdup_printf ("Missing medatata section in the CLI header"));
 
-	if ((read32 (ptr + 16) & ~0x0001000B) != 0)
+	if ((read32 (ptr + 16) & ~0x0003000B) != 0)
 		ADD_ERROR (ctx, g_strdup_printf ("Invalid CLI header flags"));
 
 	ptr += 24;
@@ -1069,7 +1073,7 @@ search_sorted_table (VerifyContext *ctx, int table, int column, guint32 coded_to
 	base = tinfo->base;
 
 	VERIFIER_DEBUG ( printf ("looking token %x table %d col %d rsize %d roff %d\n", coded_token, table, column, locator.col_size, locator.col_offset) );
-	res = mono_binary_search (&locator, base, tinfo->rows, tinfo->row_size, token_locator);
+	res = (const char *)mono_binary_search (&locator, base, tinfo->rows, tinfo->row_size, token_locator);
 	if (!res)
 		return -1;
 
@@ -1512,6 +1516,7 @@ parse_method_signature (VerifyContext *ctx, const char **_ptr, const char *end, 
 static gboolean
 parse_property_signature (VerifyContext *ctx, const char **_ptr, const char *end)
 {
+	unsigned type = 0;
 	unsigned sig = 0;
 	unsigned param_count = 0, i;
 	const char *ptr = *_ptr;
@@ -1527,6 +1532,13 @@ parse_property_signature (VerifyContext *ctx, const char **_ptr, const char *end
 
 	if (!parse_custom_mods (ctx, &ptr, end))
 		return FALSE;
+
+	if (!safe_read8 (type, ptr, end))
+		FAIL (ctx, g_strdup ("PropertySig: Not enough room for the type"));
+
+	//check if it's a byref. safe_read8 did update ptr, so we rollback if it's not a byref
+	if (type != MONO_TYPE_BYREF)
+		--ptr;
 
 	if (!parse_type (ctx, &ptr, end))
 		FAIL (ctx, g_strdup ("PropertySig: Could not parse property type"));
@@ -1771,6 +1783,7 @@ is_valid_ser_string (VerifyContext *ctx, const char **_ptr, const char *end)
 static MonoClass*
 get_enum_by_encoded_name (VerifyContext *ctx, const char **_ptr, const char *end)
 {
+	MonoError error;
 	MonoType *type;
 	MonoClass *klass;
 	const char *str_start = NULL;
@@ -1787,12 +1800,13 @@ get_enum_by_encoded_name (VerifyContext *ctx, const char **_ptr, const char *end
 		return NULL;
 	}
 
-	enum_name = g_memdup (str_start, str_len + 1);
+	enum_name = (char *)g_memdup (str_start, str_len + 1);
 	enum_name [str_len] = 0;
-	type = mono_reflection_type_from_name (enum_name, ctx->image);
-	if (!type) {
-		ADD_ERROR_NO_RETURN (ctx, g_strdup_printf ("CustomAttribute: Invalid enum class %s", enum_name));
+	type = mono_reflection_type_from_name_checked (enum_name, ctx->image, &error);
+	if (!type || !is_ok (&error)) {
+		ADD_ERROR_NO_RETURN (ctx, g_strdup_printf ("CustomAttribute: Invalid enum class %s, due to %s", enum_name, mono_error_get_message (&error)));
 		g_free (enum_name);
+		mono_error_cleanup (&error);
 		return NULL;
 	}
 	g_free (enum_name);
@@ -1881,7 +1895,7 @@ handle_enum:
 			} else if (etype == 0x50 || etype == MONO_TYPE_CLASS) {
 				klass = mono_defaults.systemtype_class;
 			} else if ((etype >= MONO_TYPE_BOOLEAN && etype <= MONO_TYPE_STRING) || etype == 0x51) {
-				simple_type.type = etype == 0x51 ? MONO_TYPE_OBJECT : etype;
+				simple_type.type = etype == 0x51 ? MONO_TYPE_OBJECT : (MonoTypeEnum)etype;
 				klass = mono_class_from_mono_type (&simple_type);
 			} else
 				FAIL (ctx, g_strdup_printf ("CustomAttribute: Invalid array element type %x", etype));
@@ -1892,8 +1906,13 @@ handle_enum:
 		FAIL (ctx, g_strdup_printf ("CustomAttribute: Invalid boxed object type %x", sub_type));
 	}
 
-
 	case MONO_TYPE_CLASS:
+		if (klass && klass->enumtype) {
+			klass = klass->element_class;
+			type = klass->byval_arg.type;
+			goto handle_enum;
+		}
+
 		if (klass != mono_defaults.systemtype_class)
 			FAIL (ctx, g_strdup_printf ("CustomAttribute: Invalid class parameter type %s:%s ",klass->name_space, klass->name));
 		*_ptr = ptr;
@@ -1986,7 +2005,7 @@ is_valid_cattr_content (VerifyContext *ctx, MonoMethod *ctor, const char *ptr, g
 			FAIL (ctx, g_strdup_printf ("CustomAttribute: Not enough space for named parameter %d type", i));
 
 		if (kind >= MONO_TYPE_BOOLEAN && kind <= MONO_TYPE_STRING) {
-			simple_type.type = kind;
+			simple_type.type = (MonoTypeEnum)kind;
 			type = &simple_type;
 		} else if (kind == MONO_TYPE_ENUM) {
 			MonoClass *klass = get_enum_by_encoded_name (ctx, &ptr, end);
@@ -2010,7 +2029,7 @@ is_valid_cattr_content (VerifyContext *ctx, MonoMethod *ctor, const char *ptr, g
 			} else if (etype == 0x50 || etype == MONO_TYPE_CLASS) {
 				klass = mono_defaults.systemtype_class;
 			} else if ((etype >= MONO_TYPE_BOOLEAN && etype <= MONO_TYPE_STRING) || etype == 0x51) {
-				simple_type.type = etype == 0x51 ? MONO_TYPE_OBJECT : etype;
+				simple_type.type = etype == 0x51 ? MONO_TYPE_OBJECT : (MonoTypeEnum)etype;
 				klass = mono_class_from_mono_type (&simple_type);
 			} else
 				FAIL (ctx, g_strdup_printf ("CustomAttribute: Invalid array element type %x", etype));
@@ -2396,7 +2415,7 @@ verify_typeref_table (VerifyContext *ctx)
 }
 
 /*bits 9,11,14,15,19,21,24-31 */
-#define INVALID_TYPEDEF_FLAG_BITS ((1 << 6) | (1 << 9) | (1 << 14) | (1 << 15) | (1 << 19) | (1 << 21) | 0xFF000000)
+#define INVALID_TYPEDEF_FLAG_BITS ((1 << 6) | (1 << 9) | (1 << 15) | (1 << 19) | (1 << 21) | 0xFF000000)
 static void
 verify_typedef_table (VerifyContext *ctx)
 {
@@ -2411,7 +2430,7 @@ verify_typedef_table (VerifyContext *ctx)
 	for (i = 0; i < table->rows; ++i) {
 		mono_metadata_decode_row (table, i, data, MONO_TYPEDEF_SIZE);
 		if (data [MONO_TYPEDEF_FLAGS] & INVALID_TYPEDEF_FLAG_BITS)
-			ADD_ERROR (ctx, g_strdup_printf ("Invalid typedef row %d invalid flags field 0x%08x", i, data [MONO_TYPEDEF_FLAGS]));
+			ADD_ERROR (ctx, g_strdup_printf ("Invalid typedef row %d invalid flags field 0x%08x rejected bits: 0x%08x", i, data [MONO_TYPEDEF_FLAGS], data [MONO_TYPEDEF_FLAGS] & INVALID_TYPEDEF_FLAG_BITS));
 
 		if ((data [MONO_TYPEDEF_FLAGS] & TYPE_ATTRIBUTE_LAYOUT_MASK) == 0x18)
 			ADD_ERROR (ctx, g_strdup_printf ("Invalid typedef row %d invalid class layout 0x18", i));
@@ -2925,6 +2944,7 @@ verify_cattr_table (VerifyContext *ctx)
 static void
 verify_cattr_table_full (VerifyContext *ctx)
 {
+	MonoError error;
 	MonoTableInfo *table = &ctx->image->tables [MONO_TABLE_CUSTOMATTRIBUTE];
 	MonoMethod *ctor;
 	const char *ptr;
@@ -2949,13 +2969,21 @@ verify_cattr_table_full (VerifyContext *ctx)
 			ADD_ERROR (ctx, g_strdup_printf ("Invalid CustomAttribute constructor row %d Token 0x%08x", i, data [MONO_CUSTOM_ATTR_TYPE]));
 		}
 
-		ctor = mono_get_method (ctx->image, mtoken, NULL);
+		ctor = mono_get_method_checked (ctx->image, mtoken, NULL, NULL, &error);
+
+		if (!ctor) {
+			ADD_ERROR (ctx, g_strdup_printf ("Invalid CustomAttribute content row %d Could not load ctor due to %s", i, mono_error_get_message (&error)));
+			mono_error_cleanup (&error);
+		}
 
 		/*This can't fail since this is checked in is_valid_cattr_blob*/
 		g_assert (decode_signature_header (ctx, data [MONO_CUSTOM_ATTR_VALUE], &size, &ptr));
 
-		if (!is_valid_cattr_content (ctx, ctor, ptr, size))
-			ADD_ERROR (ctx, g_strdup_printf ("Invalid CustomAttribute content row %d Value field 0x%08x", i, data [MONO_CUSTOM_ATTR_VALUE]));
+		if (!is_valid_cattr_content (ctx, ctor, ptr, size)) {
+			char *ctor_name =  mono_method_full_name (ctor, TRUE);
+			ADD_ERROR (ctx, g_strdup_printf ("Invalid CustomAttribute content row %d Value field 0x%08x ctor: %s", i, data [MONO_CUSTOM_ATTR_VALUE], ctor_name));
+			g_free (ctor_name);
+		}
 	}
 }
 
@@ -3487,7 +3515,7 @@ verify_exportedtype_table (VerifyContext *ctx)
 static void
 verify_manifest_resource_table (VerifyContext *ctx)
 {
-	MonoCLIImageInfo *iinfo = ctx->image->image_info;
+	MonoCLIImageInfo *iinfo = (MonoCLIImageInfo *)ctx->image->image_info;
 	MonoCLIHeader *ch = &iinfo->cli_cli_header;
 	MonoTableInfo *table = &ctx->image->tables [MONO_TABLE_MANIFESTRESOURCE];
 	guint32 data [MONO_MANIFEST_SIZE], impl_table, token, resources_size;
@@ -3662,15 +3690,15 @@ typedef struct {
 static guint
 typedef_hash (gconstpointer _key)
 {
-	const TypeDefUniqueId *key = _key;
+	const TypeDefUniqueId *key = (const TypeDefUniqueId *)_key;
 	return g_str_hash (key->name) ^ g_str_hash (key->name_space) ^ key->resolution_scope; /*XXX better salt the int key*/
 }
 
 static gboolean
 typedef_equals (gconstpointer _a, gconstpointer _b)
 {
-	const TypeDefUniqueId *a = _a;
-	const TypeDefUniqueId *b = _b;
+	const TypeDefUniqueId *a = (const TypeDefUniqueId *)_a;
+	const TypeDefUniqueId *b = (const TypeDefUniqueId *)_b;
 	return !strcmp (a->name, b->name) && !strcmp (a->name_space, b->name_space) && a->resolution_scope == b->resolution_scope;
 }
 
@@ -3742,6 +3770,54 @@ verify_typeref_table_global_constraints (VerifyContext *ctx)
 	g_hash_table_destroy (unique_types);
 }
 
+typedef struct {
+	guint32 klass;
+	guint32 method_declaration;
+} MethodImplUniqueId;
+
+static guint
+methodimpl_hash (gconstpointer _key)
+{
+	const MethodImplUniqueId *key = (const MethodImplUniqueId *)_key;
+	return key->klass ^ key->method_declaration;
+}
+
+static gboolean
+methodimpl_equals (gconstpointer _a, gconstpointer _b)
+{
+	const MethodImplUniqueId *a = (const MethodImplUniqueId *)_a;
+	const MethodImplUniqueId *b = (const MethodImplUniqueId *)_b;
+	return a->klass == b->klass && a->method_declaration == b->method_declaration;
+}
+
+static void
+verify_methodimpl_table_global_constraints (VerifyContext *ctx)
+{
+	int i;
+	guint32 data [MONO_METHODIMPL_SIZE];
+	MonoTableInfo *table = &ctx->image->tables [MONO_TABLE_METHODIMPL];
+	GHashTable *unique_impls = g_hash_table_new_full (&methodimpl_hash, &methodimpl_equals, g_free, NULL);
+
+	for (i = 0; i < table->rows; ++i) {
+		MethodImplUniqueId *impl = g_new (MethodImplUniqueId, 1);
+		mono_metadata_decode_row (table, i, data, MONO_METHODIMPL_SIZE);
+
+		impl->klass = data [MONO_METHODIMPL_CLASS];
+		impl->method_declaration = data [MONO_METHODIMPL_DECLARATION];
+
+		if (g_hash_table_lookup (unique_impls, impl)) {
+			ADD_ERROR_NO_RETURN (ctx, g_strdup_printf ("MethodImpl table row %d has duplicate for tuple (0x%x, 0x%x)", impl->klass, impl->method_declaration));
+			g_hash_table_destroy (unique_impls);
+			g_free (impl);
+			return;
+		}
+		g_hash_table_insert (unique_impls, impl, GUINT_TO_POINTER (1));
+	}
+
+	g_hash_table_destroy (unique_impls);
+}
+
+
 static void
 verify_tables_data_global_constraints (VerifyContext *ctx)
 {
@@ -3753,6 +3829,7 @@ verify_tables_data_global_constraints_full (VerifyContext *ctx)
 {
 	verify_typeref_table (ctx);
 	verify_typeref_table_global_constraints (ctx);
+	verify_methodimpl_table_global_constraints (ctx);
 }
 
 static void
@@ -3878,7 +3955,7 @@ cleanup_context_checked (VerifyContext *ctx, MonoError *error)
 {
 	g_free (ctx->sections);
 	if (ctx->errors) {
-		MonoVerifyInfo *info = ctx->errors->data;
+		MonoVerifyInfo *info = (MonoVerifyInfo *)ctx->errors->data;
 		mono_error_set_bad_image (error, ctx->image, "%s", info->message);
 		mono_free_verify_list (ctx->errors);
 	}
@@ -4048,7 +4125,7 @@ mono_verifier_verify_method_signature (MonoImage *image, guint32 offset, MonoErr
 {
 	VerifyContext ctx;
 
-	mono_error_init (error);
+	error_init (error);
 
 	if (!mono_verifier_is_enabled_for_image (image))
 		return TRUE;
@@ -4221,8 +4298,6 @@ mono_verifier_is_sig_compatible (MonoImage *image, MonoMethod *method, MonoMetho
 			return FALSE;
 		if (original_sig->explicit_this != signature->explicit_this)
 			return FALSE;
-		if (original_sig->call_convention != signature->call_convention)
-			return FALSE;
 		if (original_sig->pinvoke != signature->pinvoke)
 			return FALSE;
 		if (original_sig->sentinelpos != signature->sentinelpos)
@@ -4240,7 +4315,7 @@ mono_verifier_verify_typeref_row (MonoImage *image, guint32 row, MonoError *erro
 	MonoTableInfo *table = &image->tables [MONO_TABLE_TYPEREF];
 	guint32 data [MONO_TYPEREF_SIZE];
 
-	mono_error_init (error);
+	error_init (error);
 
 	if (!mono_verifier_is_enabled_for_image (image))
 		return TRUE;
@@ -4283,7 +4358,7 @@ mono_verifier_verify_methodimpl_row (MonoImage *image, guint32 row, MonoError *e
 	MonoTableInfo *table = &image->tables [MONO_TABLE_METHODIMPL];
 	guint32 data [MONO_METHODIMPL_SIZE];
 
-	mono_error_init (error);
+	error_init (error);
 
 	if (!mono_verifier_is_enabled_for_image (image))
 		return TRUE;
@@ -4366,7 +4441,7 @@ mono_verifier_verify_method_header (MonoImage *image, guint32 offset, GSList **e
 gboolean
 mono_verifier_verify_method_signature (MonoImage *image, guint32 offset, MonoError *error)
 {
-	mono_error_init (error);
+	error_init (error);
 	return TRUE;
 }
 
@@ -4416,14 +4491,14 @@ mono_verifier_is_sig_compatible (MonoImage *image, MonoMethod *method, MonoMetho
 gboolean
 mono_verifier_verify_typeref_row (MonoImage *image, guint32 row, MonoError *error)
 {
-	mono_error_init (error);
+	error_init (error);
 	return TRUE;
 }
 
 gboolean
 mono_verifier_verify_methodimpl_row (MonoImage *image, guint32 row, MonoError *error)
 {
-	mono_error_init (error);
+	error_init (error);
 	return TRUE;
 }
 

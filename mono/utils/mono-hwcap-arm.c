@@ -1,5 +1,6 @@
-/*
- * mono-hwcap-arm.c: ARM hardware feature detection
+/**
+ * \file
+ * ARM hardware feature detection
  *
  * Authors:
  *    Alex Rønne Petersen (alexrp@xamarin.com)
@@ -16,34 +17,28 @@
  * Copyright 2006 Broadcom
  * Copyright 2007-2008 Andreas Faerber
  * Copyright 2011-2013 Xamarin Inc
+ * Licensed under the MIT license. See LICENSE file in the project root for full license information.
  */
 
-#include "mono/utils/mono-hwcap-arm.h"
+#include "mono/utils/mono-hwcap.h"
 
-#if defined(HAVE_SYS_AUXV_H) && !defined(PLATFORM_ANDROID)
+#if defined(HAVE_SYS_AUXV_H) && !defined(HOST_ANDROID)
 #include <sys/auxv.h>
 #elif defined(__APPLE__)
 #include <mach/machine.h>
 #include <sys/sysctl.h>
 #include <sys/types.h>
 #else
+#if defined (HAVE_SYS_UTSNAME_H)
+#include <sys/utsname.h>
+#endif
 #include <stdio.h>
 #endif
-
-gboolean mono_hwcap_arm_is_v5 = FALSE;
-gboolean mono_hwcap_arm_is_v6 = FALSE;
-gboolean mono_hwcap_arm_is_v7 = FALSE;
-gboolean mono_hwcap_arm_is_v7s = FALSE;
-gboolean mono_hwcap_arm_has_vfp = FALSE;
-gboolean mono_hwcap_arm_has_vfp3 = FALSE;
-gboolean mono_hwcap_arm_has_vfp3_d16 = FALSE;
-gboolean mono_hwcap_arm_has_thumb = FALSE;
-gboolean mono_hwcap_arm_has_thumb2 = FALSE;
 
 void
 mono_hwcap_arch_init (void)
 {
-#if defined(HAVE_SYS_AUXV_H) && !defined(PLATFORM_ANDROID)
+#if defined(HAVE_SYS_AUXV_H) && !defined(HOST_ANDROID)
 	unsigned long hwcap;
 	unsigned long platform;
 
@@ -105,6 +100,50 @@ mono_hwcap_arch_init (void)
 	 * hit this path if the target doesn't have sys/auxv.h.
 	 */
 
+#if defined (HAVE_SYS_UTSNAME_H)
+	struct utsname name;
+
+	/* Only fails if `name` is invalid (it isn't). */
+	g_assert (!uname (&name));
+
+	if (!strncmp (name.machine, "aarch64", 7) || !strncmp (name.machine, "armv8", 5)) {
+		/*
+		 * We're a 32-bit program running on an ARMv8 system.
+		 * Whether the system is actually 32-bit or 64-bit
+		 * doesn't matter to us. The important thing is that
+		 * all 3 of ARMv8's execution states (A64, A32, T32)
+		 * are guaranteed to have all of the features that
+		 * we want to detect and use.
+		 *
+		 * We do this ARMv8 detection via uname () because
+		 * in the early days of ARMv8 on Linux, the
+		 * /proc/cpuinfo format was a disaster and there
+		 * were multiple (merged into mainline) attempts at
+		 * cleaning it up (read: breaking applications that
+		 * tried to rely on it). So now multiple ARMv8
+		 * systems in the wild have different /proc/cpuinfo
+		 * output, some of which are downright useless.
+		 *
+		 * So, when it comes to detecting ARMv8 in a 32-bit
+		 * program, it's better to just avoid /proc/cpuinfo
+		 * entirely. Maybe in a decade or two, we won't
+		 * have to worry about this mess that the Linux ARM
+		 * maintainers created. One can hope.
+		 */
+
+		mono_hwcap_arm_is_v5 = TRUE;
+		mono_hwcap_arm_is_v6 = TRUE;
+		mono_hwcap_arm_is_v7 = TRUE;
+
+		mono_hwcap_arm_has_vfp = TRUE;
+		mono_hwcap_arm_has_vfp3 = TRUE;
+		mono_hwcap_arm_has_vfp3_d16 = TRUE;
+
+		mono_hwcap_arm_has_thumb = TRUE;
+		mono_hwcap_arm_has_thumb2 = TRUE;
+	}
+#endif
+
 	char buf [512];
 	char *line;
 
@@ -112,7 +151,8 @@ mono_hwcap_arch_init (void)
 
 	if (file) {
 		while ((line = fgets (buf, 512, file))) {
-			if (!strncmp (line, "Processor", 9)) {
+			if (!strncmp (line, "Processor", 9) ||
+			    !strncmp (line, "model name", 10)) {
 				char *ver = strstr (line, "(v");
 
 				if (ver) {
@@ -153,18 +193,4 @@ mono_hwcap_arch_init (void)
 		fclose (file);
 	}
 #endif
-}
-
-void
-mono_hwcap_print(FILE *f)
-{
-	g_fprintf (f, "mono_hwcap_arm_is_v5 = %i\n", mono_hwcap_arm_is_v5);
-	g_fprintf (f, "mono_hwcap_arm_is_v6 = %i\n", mono_hwcap_arm_is_v6);
-	g_fprintf (f, "mono_hwcap_arm_is_v7 = %i\n", mono_hwcap_arm_is_v7);
-	g_fprintf (f, "mono_hwcap_arm_is_v7s = %i\n", mono_hwcap_arm_is_v7s);
-	g_fprintf (f, "mono_hwcap_arm_has_vfp = %i\n", mono_hwcap_arm_has_vfp);
-	g_fprintf (f, "mono_hwcap_arm_has_vfp3 = %i\n", mono_hwcap_arm_has_vfp3);
-	g_fprintf (f, "mono_hwcap_arm_has_vfp3_d16 = %i\n", mono_hwcap_arm_has_vfp3_d16);
-	g_fprintf (f, "mono_hwcap_arm_has_thumb = %i\n", mono_hwcap_arm_has_thumb);
-	g_fprintf (f, "mono_hwcap_arm_has_thumb2 = %i\n", mono_hwcap_arm_has_thumb2);
 }

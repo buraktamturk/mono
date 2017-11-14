@@ -477,7 +477,7 @@ namespace System.Runtime.Remoting
 		public static bool IsMethodOverloaded(IMethodMessage msg)
 		{
 			const BindingFlags bfinst = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance;
-			MonoType type = (MonoType) msg.MethodBase.DeclaringType;
+			RuntimeType type = (RuntimeType) msg.MethodBase.DeclaringType;
 			return type.GetMethodsByName (msg.MethodName, bfinst, false, type).Length > 1;
 		}
 
@@ -581,7 +581,7 @@ namespace System.Runtime.Remoting
 			RemotingProxy proxy = new RemotingProxy (type, ChannelServices.CrossContextUrl, activationAttributes);
 			return proxy.GetTransparentProxy();
 		}
-#if !NET_2_1
+#if !MOBILE
 		internal static object CreateClientProxyForComInterop (Type type)
 		{
 			Mono.Interop.ComInteropProxy proxy = Mono.Interop.ComInteropProxy.CreateProxy (type);
@@ -808,41 +808,15 @@ namespace System.Runtime.Remoting
 		[SecurityPermission (SecurityAction.Assert, SerializationFormatter = true)] // FIXME: to be reviewed
 		internal static byte[] SerializeExceptionData (Exception ex)
 		{
+			byte[] result = null;
 			try {
-				int retry = 4;
-				
-				do {
-					try {
-						MemoryStream ms = new MemoryStream ();
-						_serializationFormatter.Serialize (ms, ex);
-						return ms.ToArray ();
-					}
-					catch (Exception e) {
-						if (e is ThreadAbortException) {
-							Thread.ResetAbort ();
-							retry = 5;
-							ex = e;
-						}
-						else if (retry == 2) {
-							ex = new Exception ();
-							ex.SetMessage (e.Message);
-							ex.SetStackTrace (e.StackTrace);
-						}
-						else
-							ex = e;
-					}
-					retry--;
-				}
-				while (retry > 0);
-				
-				return null;
+				/* empty - we're only interested in the protected block */
+			} finally {
+				MemoryStream ms = new MemoryStream ();
+				_serializationFormatter.Serialize (ms, ex);
+				result = ms.ToArray ();
 			}
-			catch (Exception tex)
-			{
-				byte[] data = SerializeExceptionData (tex);
-				Thread.ResetAbort ();
-				return data;
-			}
+			return result;
 		}
 		
 		internal static object GetDomainProxy(AppDomain domain) 

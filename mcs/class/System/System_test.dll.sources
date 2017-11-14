@@ -1,3 +1,4 @@
+../../test-helpers/NunitHelpers.cs
 Microsoft.CSharp/CodeGeneratorFromCompileUnitTest.cs
 Microsoft.CSharp/CodeGeneratorFromExpressionTest.cs
 Microsoft.CSharp/CodeGeneratorFromNamespaceTest.cs
@@ -231,7 +232,6 @@ System.Net/ServicePointManagerTest.cs
 System.Net/ServicePointTest.cs
 System.Net/SocketPermissionAttributeTest.cs
 System.Net/SocketPermissionTest.cs
-System.Net/SocketResponder.cs
 System.Net/WebHeaderCollectionTest.cs
 System.Net/WebPermissionAttributeTest.cs
 System.Net/WebPermissionTest.cs
@@ -248,6 +248,7 @@ System.Net.Sockets/MulticastOptionTest.cs
 System.Net.Sockets/NetworkStreamTest.cs
 System.Net.Sockets/TcpClientTest.cs
 System.Net.Sockets/TcpListenerTest.cs
+System.Net.Sockets/SocketAcceptAsyncTest.cs
 System.Net.Sockets/SocketTest.cs
 System.Net.Sockets/SocketAsyncEventArgsTest.cs
 System.Net.Sockets/SocketConnectAsyncTest.cs
@@ -510,3 +511,4 @@ System.Collections.Concurrent/CollectionStressTestHelper.cs
 System.Collections.Concurrent/ParallelTestHelper.cs
 System.Net.WebSockets/ClientWebSocketTest.cs
 ../../test-helpers/NetworkHelpers.cs
+../../test-helpers/SocketResponder.cs

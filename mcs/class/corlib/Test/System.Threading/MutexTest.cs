@@ -20,6 +20,7 @@ namespace MonoTests.System.Threading
 		{
 			public int id;
 			public Mutex mut;
+			public bool abandoned_exception;
 			public ConcClass(int id,Mutex mut)
 			{
 				this.id = id;
@@ -63,7 +64,12 @@ namespace MonoTests.System.Threading
 
 			public void WaitAndForget()
 			{
-				this.Wait();
+				try {
+					this.Wait();
+				} catch (AbandonedMutexException) {
+					this.abandoned_exception = true;
+				}
+
 				this.marker = id;
 			}
 			public void WaitAndWait()
@@ -128,12 +134,16 @@ namespace MonoTests.System.Threading
 				TestUtil.WaitForNotAlive (thread1, "");
 				Assert.AreEqual (100, class1.marker);
 			} finally {
+#if MONO_FEATURE_THREAD_ABORT
 				thread1.Abort ();
+#else
+				thread1.Interrupt ();
+#endif
 			}
 		}
 
 		[Test]
-		public void TestWaitAndFoget1()
+		public void TestWaitAndForget1()
 		{
 			Mutex Sem = new Mutex(false);
 			ConcClassLoop class1 = new ConcClassLoop(1,Sem);
@@ -144,14 +154,21 @@ namespace MonoTests.System.Threading
 			try {
 				thread1.Start();
 				TestUtil.WaitForNotAlive (thread1, "t1");
+				Assert.IsFalse (class1.abandoned_exception, "e1");
 	
 				thread2.Start();
 				TestUtil.WaitForNotAlive (thread2, "t2");
+				Assert.IsTrue (class2.abandoned_exception, "e2");
 			
 				Assert.AreEqual (class2.id, class2.marker);
 			} finally {
+#if MONO_FEATURE_THREAD_ABORT
 				thread1.Abort ();
 				thread2.Abort ();
+#else
+				thread1.Interrupt ();
+				thread2.Interrupt ();
+#endif
 			}
 		}
 

@@ -383,8 +383,13 @@ namespace Mono.Security.X509 {
 
 				byte[] authSafeData = authSafe.Content [0].Value;
 				byte[] calculatedMac = MAC (_password, macSalt.Value, _iterations, authSafeData);
-				if (!Compare (macValue, calculatedMac))
-					throw new CryptographicException ("Invalid MAC - file may have been tampered!");
+				if (!Compare (macValue, calculatedMac)) {
+					byte[] nullPassword = {0, 0};
+					calculatedMac = MAC(nullPassword, macSalt.Value, _iterations, authSafeData);
+					if (!Compare (macValue, calculatedMac))
+						throw new CryptographicException ("Invalid MAC - file may have been tampered with!");
+					_password = nullPassword;
+				}
 			}
 
 			// we now returns to our original presentation - PFX
@@ -430,6 +435,10 @@ namespace Mono.Security.X509 {
 
 		public string Password {
 			set {
+				// Clear old password.
+				if (_password != null)
+					Array.Clear (_password, 0, _password.Length);
+				_password = null;
 				if (value != null) {
 					if (value.Length > 0) {
 						int size = value.Length;
@@ -447,9 +456,6 @@ namespace Mono.Security.X509 {
 						// double-byte (Unicode) NULL (0x00) - see bug #79617
 						_password = new byte[2];
 					}
-				} else {
-					// no password
-					_password = null;
 				}
 			}
 		}

@@ -124,6 +124,9 @@ namespace MonoTests.System.Net
 		}
 
 		[Test]
+#if FEATURE_NO_BSD_SOCKETS
+		[ExpectedException (typeof (PlatformNotSupportedException))]
+#endif
 		public void AddRestricted ()
 		{
 			col = CreateRestrictedHeaders ();
@@ -204,6 +207,15 @@ namespace MonoTests.System.Net
 		}
 
 		[Test]
+		public void GetValuesForMultipleHeaderManyLines ()
+		{
+			WebHeaderCollection w = new WebHeaderCollection ();
+			w.Add ("Pragma", "H1, H2");
+			w.Add ("Pragma", "H3");
+			Assert.AreEqual (3, w.GetValues ("Pragma").Length, "#1");
+		}
+
+		[Test]
 		public void Indexers ()
 		{
 			Assert.AreEqual ("Value1", ((NameValueCollection)col)[0], "#1.1");
@@ -227,6 +239,9 @@ namespace MonoTests.System.Net
 		}
 
 		[Test]
+#if FEATURE_NO_BSD_SOCKETS
+		[ExpectedException (typeof (PlatformNotSupportedException))]
+#endif
 		public void RemoveRestricted ()
 		{
 			col = CreateRestrictedHeaders ();

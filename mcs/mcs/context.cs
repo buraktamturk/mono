@@ -22,7 +22,8 @@ namespace Mono.CSharp
 	{
 		Normal = 0,
 		Probing = 1,
-		IgnoreAccessibility = 2
+		IgnoreAccessibility = 2,
+		IgnoreStaticUsing = 1 << 10
 	}
 
 	//
@@ -112,9 +113,14 @@ namespace Mono.CSharp
 
 			if (rc.HasSet (ResolveContext.Options.BaseInitializer))
 				flags |= ResolveContext.Options.BaseInitializer;
+
+			if (rc.HasSet (ResolveContext.Options.QueryClauseScope))
+				flags |= ResolveContext.Options.QueryClauseScope;
 		}
 
 		public ExceptionStatement CurrentTryBlock { get; set; }
+
+		public TryCatch CurrentTryCatch { get; set; }
 
 		public LoopStatement EnclosingLoop { get; set; }
 
@@ -189,7 +195,11 @@ namespace Mono.CSharp
 
 			TryWithCatchScope = 1 << 15,
 
-			ConditionalAccessReceiver = 1 << 16,
+			DontSetConditionalAccessReceiver = 1 << 16,
+
+			NameOfScope = 1 << 17,
+
+			QueryClauseScope = 1 << 18,
 
 			///
 			/// Indicates the current context is in probing mode, no errors are reported. 
@@ -445,7 +455,6 @@ namespace Mono.CSharp
 	public class FlowAnalysisContext
 	{
 		readonly CompilerContext ctx;
-		DefiniteAssignmentBitSet conditional_access;
 
 		public FlowAnalysisContext (CompilerContext ctx, ParametersBlock parametersBlock, int definiteAssignmentLength)
 		{
@@ -523,17 +532,17 @@ namespace Mono.CSharp
 			return da;
 		}
 
-		public void BranchConditionalAccessDefiniteAssignment ()
+		public Dictionary<Statement, List<DefiniteAssignmentBitSet>> CopyLabelStack ()
 		{
-			if (conditional_access == null)
-				conditional_access = BranchDefiniteAssignment ();
-		}
+			if (LabelStack == null)
+				return null;
 
-		public void ConditionalAccessEnd ()
-		{
-			Debug.Assert (conditional_access != null);
-			DefiniteAssignment = conditional_access;
-			conditional_access = null;
+			var dest = new Dictionary<Statement, List<DefiniteAssignmentBitSet>> ();
+			foreach (var entry in LabelStack) {
+				dest.Add (entry.Key, new List<DefiniteAssignmentBitSet> (entry.Value));
+			}
+
+			return dest;
 		}
 
 		public bool IsDefinitelyAssigned (VariableInfo variable)
@@ -546,9 +555,19 @@ namespace Mono.CSharp
 			return variable.IsStructFieldAssigned (DefiniteAssignment, name);
 		}
 
+		public void SetLabelStack (Dictionary<Statement, List<DefiniteAssignmentBitSet>> labelStack)
+		{
+			LabelStack = labelStack;
+		}
+
 		public void SetVariableAssigned (VariableInfo variable, bool generatedAssignment = false)
 		{
 			variable.SetAssigned (DefiniteAssignment, generatedAssignment);
+		}
+
+		public void SetVariableAssigned (VariableInfo variable, DefiniteAssignmentBitSet da)
+		{
+			variable.SetAssigned (da, false);
 		}
 
 		public void SetStructFieldAssigned (VariableInfo variable, string name)
@@ -666,13 +685,13 @@ namespace Mono.CSharp
 			if (all_source_files == null) {
 				all_source_files = new Dictionary<string, SourceFile> ();
 				foreach (var source in SourceFiles)
-					all_source_files[source.FullPathName] = source;
+					all_source_files[source.OriginalFullPathName] = source;
 			}
 
 			string path;
 			if (!Path.IsPathRooted (name)) {
 				var loc = comp_unit.SourceFile;
-				string root = Path.GetDirectoryName (loc.FullPathName);
+				string root = Path.GetDirectoryName (loc.OriginalFullPathName);
 				path = Path.GetFullPath (Path.Combine (root, name));
 				var dir = Path.GetDirectoryName (loc.Name);
 				if (!string.IsNullOrEmpty (dir))

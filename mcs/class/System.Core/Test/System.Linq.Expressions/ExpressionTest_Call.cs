@@ -29,6 +29,7 @@
 
 using System;
 using System.Reflection;
+using System.Reflection.Emit;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
@@ -223,7 +224,6 @@ namespace MonoTests.System.Linq.Expressions {
 		}
 
 		[Test]
-		[Category ("NotWorkingInterpreter")]
 		public void CallMethodOnStruct ()
 		{
 			var param = Expression.Parameter (typeof (EineStrukt), "s");
@@ -237,6 +237,17 @@ namespace MonoTests.System.Linq.Expressions {
 		public static int OneStaticMethod ()
 		{
 			return 42;
+		}
+
+		[Test]
+		public void CallMethodOnDateTime ()
+		{
+			var left = Expression.Call (Expression.Constant (DateTime.Now), typeof(DateTime).GetMethod ("AddDays"), Expression.Constant (-5.0));
+			var right = Expression.Constant (DateTime.Today.AddDays (1));
+			var expr = Expression.GreaterThan (left, right);
+
+			var eq = Expression.Lambda<Func<bool>> (expr).Compile ();
+			Assert.IsFalse (eq ());
 		}
 
 		[Test]
@@ -260,7 +271,6 @@ namespace MonoTests.System.Linq.Expressions {
 		}
 
 		[Test]
-		[Category ("NotWorkingInterpreter")]
 		public void CallStaticMethodWithRefParameter ()
 		{
 			var p = Expression.Parameter (typeof (int), "i");
@@ -272,7 +282,6 @@ namespace MonoTests.System.Linq.Expressions {
 		}
 
 		[Test]
-		[Category ("NotWorkingInterpreter")]
 		public void CallStaticMethodWithRefParameterAndOtherParameter ()
 		{
 			var i = Expression.Parameter (typeof (int), "i");
@@ -283,6 +292,38 @@ namespace MonoTests.System.Linq.Expressions {
 
 			Assert.AreEqual ("foo42", lamda (42, "foo"));
 		}
+
+#if !FULL_AOT_RUNTIME
+		[Test]
+		public void CallDynamicMethod_ToString ()
+		{
+			// Regression test for #49686
+			var m = new DynamicMethod ("intIntId", typeof (int), new Type [] { typeof (int) });
+			var ilg = m.GetILGenerator ();
+			ilg.Emit (OpCodes.Ldarg_0);
+			ilg.Emit (OpCodes.Ret);
+
+			var i = Expression.Parameter (typeof (int), "i");
+			var e = Expression.Call (m, i);
+
+			Assert.IsNotNull (e.ToString ());
+		}
+
+		[Test]
+		public void CallDynamicMethod_CompileInvoke ()
+		{
+			var m = new DynamicMethod ("intIntId", typeof (int), new Type [] { typeof (int) });
+			var ilg = m.GetILGenerator ();
+			ilg.Emit (OpCodes.Ldarg_0);
+			ilg.Emit (OpCodes.Ret);
+
+			var i = Expression.Parameter (typeof (int), "i");
+			var e = Expression.Call (m, i);
+
+			var lambda = Expression.Lambda<Func<int, int>> (e, i).Compile ();
+			Assert.AreEqual (42, lambda (42));
+		}
+#endif
 
 		public static int Bang (Expression i)
 		{
@@ -297,7 +338,6 @@ namespace MonoTests.System.Linq.Expressions {
 		}
 
 		[Test]
-		[Category ("NotWorkingInterpreter")]
 		public void Connect282729 ()
 		{
 			// test from https://connect.microsoft.com/VisualStudio/feedback/ViewFeedback.aspx?FeedbackID=282729
@@ -324,8 +364,6 @@ namespace MonoTests.System.Linq.Expressions {
 		}
 
 		[Test]
-		[Category ("NotWorking")]
-		[Category ("NotWorkingInterpreter")]
 		public void Connect290278 ()
 		{
 			// test from https://connect.microsoft.com/VisualStudio/feedback/ViewFeedback.aspx?FeedbackID=290278
@@ -348,7 +386,6 @@ namespace MonoTests.System.Linq.Expressions {
 		}
 
 		[Test]
-		[Category ("NotWorkingInterpreter")]
 		public void Connect297597 ()
 		{
 			// test from https://connect.microsoft.com/VisualStudio/feedback/ViewFeedback.aspx?FeedbackID=297597
@@ -366,6 +403,7 @@ namespace MonoTests.System.Linq.Expressions {
 
 		[Test]
 		[Category ("NotDotNet")] // https://connect.microsoft.com/VisualStudio/feedback/ViewFeedback.aspx?FeedbackID=319190
+		[Category ("NotWorkingInterpreter")]
 		public void Connect319190 ()
 		{
 			var lambda = Expression.Lambda<Func<bool>> (
@@ -382,7 +420,6 @@ namespace MonoTests.System.Linq.Expressions {
 		}
 
 		[Test]
-		[Category ("NotWorkingInterpreter")]
 		public void Connect282702 ()
 		{
 			var lambda = Expression.Lambda<Func<Func<int>>> (
@@ -472,9 +509,13 @@ namespace MonoTests.System.Linq.Expressions {
 		}
 
 		[Test]
-		[Category ("NotWorkingInterpreter")]
 		public void CallNullableGetValueOrDefault () // #568989
 		{
+#if MOBILE
+			// ensure that int?.GetValueOrDefault won't be removed by the linker
+			Assert.AreEqual (0, ((int?)0).GetValueOrDefault (3));
+#endif
+
 			var value = Expression.Parameter (typeof (int?), "value");
 			var default_parameter = Expression.Parameter (typeof (int), "default");
 

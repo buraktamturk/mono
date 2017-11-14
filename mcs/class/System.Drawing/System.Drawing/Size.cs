@@ -40,7 +40,9 @@ namespace System.Drawing
 {
 	[Serializable]
 	[ComVisible (true)]
+#if !MONOTOUCH && !MONOMAC && FEATURE_TYPECONVERTER
 	[TypeConverter (typeof (SizeConverter))]
+#endif
 	public struct Size
 	{ 
 		

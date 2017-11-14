@@ -92,8 +92,8 @@ namespace System.ServiceModel.Channels.Http
 			AbortConnections (timeout);
 			// FIXME: this wait is sort of hack (because it should not be required), but without it some tests are blocked.
 			// This hack even had better be moved to base.CancelAsync().
-			if (CurrentAsyncResult != null)
-				CurrentAsyncResult.AsyncWaitHandle.WaitOne (TimeSpan.FromMilliseconds (300));
+//			if (CurrentAsyncResult != null)
+//				CurrentAsyncResult.AsyncWaitHandle.WaitOne (TimeSpan.FromMilliseconds (300));
 			return base.CancelAsync (timeout);
 		}
 
@@ -104,18 +104,21 @@ namespace System.ServiceModel.Channels.Http
 		}
 
 		bool close_started;
+		object close_lock = new object ();
 
 		protected override void OnClose (TimeSpan timeout)
 		{
-			if (close_started)
-				return;
-			close_started = true;
-			DateTime start = DateTime.Now;
+			lock (close_lock) {
+				if (close_started)
+					return;
+				close_started = true;
+			}
+			DateTime start = DateTime.UtcNow;
 
 			// FIXME: consider timeout
-			AbortConnections (timeout - (DateTime.Now - start));
+			AbortConnections (timeout - (DateTime.UtcNow - start));
 
-			base.OnClose (timeout - (DateTime.Now - start));
+			base.OnClose (timeout - (DateTime.UtcNow - start));
 		}
 
 		protected string GetHeaderItem (string raw)

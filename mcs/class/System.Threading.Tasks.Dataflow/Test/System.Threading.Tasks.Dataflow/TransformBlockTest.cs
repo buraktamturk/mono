@@ -68,9 +68,9 @@ namespace MonoTests.System.Threading.Tasks.Dataflow {
 			for (int i = 0; i < array.Length; ++i)
 				Assert.IsTrue (block.Post (i), "Not accepted");
 
-			Thread.Sleep (300);
+			Thread.Sleep (600);
 			block.LinkTo (action);
-			Thread.Sleep (100);
+			Thread.Sleep (300);
 
 			CollectionAssert.AreEqual (new[] { 0, -1, -2, -3, -4, -5, -6, -7, -8, -9 }, array);
 		}
@@ -91,7 +91,7 @@ namespace MonoTests.System.Threading.Tasks.Dataflow {
 
 			block.Complete ();
 
-			Assert.IsTrue (block.Completion.Wait (100));
+			Assert.IsTrue (block.Completion.Wait (1000));
 		}
 
 		[Test]

@@ -31,6 +31,15 @@
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //
 
+#if SECURITY_DEP
+#if MONO_SECURITY_ALIAS
+extern alias MonoSecurity;
+using MonoSecurity::Mono.Security.Interface;
+#else
+using Mono.Security.Interface;
+#endif
+#endif
+
 using System;
 using System.Collections;
 using System.Configuration;
@@ -39,11 +48,13 @@ using System.IO;
 using System.Net;
 using System.Net.Cache;
 using System.Net.Sockets;
+using System.Net.Security;
 using System.Runtime.Remoting.Messaging;
 using System.Runtime.Serialization;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
+using Mono.Net.Security;
 
 namespace System.Net 
 {
@@ -101,6 +112,11 @@ namespace System.Net
 		int maxResponseHeadersLength;
 		static int defaultMaxResponseHeadersLength;
 		int readWriteTimeout = 300000; // ms
+#if SECURITY_DEP
+		MonoTlsProvider tlsProvider;
+		MonoTlsSettings tlsSettings;
+#endif
+		ServerCertValidationCallback certValidationCallback;
 
 		enum NtlmAuthState {
 			None,
@@ -117,8 +133,10 @@ namespace System.Net
 		static HttpWebRequest ()
 		{
 			defaultMaxResponseHeadersLength = 64 * 1024;
-#if !NET_2_1
+#if !MOBILE
+#pragma warning disable 618
 			NetConfig config = ConfigurationSettings.GetConfig ("system.net/settings") as NetConfig;
+#pragma warning restore 618
 			if (config != null) {
 				int x = config.MaxResponseHeadersLength;
 				if (x != -1)
@@ -129,7 +147,7 @@ namespace System.Net
 #endif
 		}
 
-#if NET_2_1
+#if MOBILE
 		public
 #else
 		internal
@@ -138,11 +156,20 @@ namespace System.Net
 		{
 			this.requestUri = uri;
 			this.actualUri = uri;
-			this.proxy = GlobalProxySelection.Select;
-			this.webHeaders = new WebHeaderCollection (WebHeaderCollection.HeaderInfo.Request);
+			this.proxy = InternalDefaultWebProxy;
+			this.webHeaders = new WebHeaderCollection (WebHeaderCollectionType.HttpWebRequest);
 			ThrowOnError = true;
 			ResetAuthorization ();
 		}
+
+#if SECURITY_DEP
+		internal HttpWebRequest (Uri uri, MonoTlsProvider tlsProvider, MonoTlsSettings settings = null)
+			: this (uri)
+		{
+			this.tlsProvider = tlsProvider;
+			this.tlsSettings = settings;
+		}
+#endif
 		
 		[Obsolete ("Serialization is obsoleted for this type", false)]
 		protected HttpWebRequest (SerializationInfo serializationInfo, StreamingContext streamingContext) 
@@ -180,11 +207,19 @@ namespace System.Net
 		
 		// Properties
 
+		void SetSpecialHeaders(string HeaderName, string value) {
+			value = WebHeaderCollection.CheckBadChars(value, true);
+			webHeaders.RemoveInternal(HeaderName);
+			if (value.Length != 0) {
+				webHeaders.AddInternal(HeaderName, value);
+			}
+		}
+
 		public string Accept {
 			get { return webHeaders ["Accept"]; }
 			set {
 				CheckRequestStarted ();
-				webHeaders.RemoveAndAdd ("Accept", value);
+				SetSpecialHeaders ("Accept", value);
 			}
 		}
 		
@@ -193,12 +228,12 @@ namespace System.Net
 			internal set { actualUri = value; } // Used by Ftp+proxy
 		}
 		
-		public bool AllowAutoRedirect {
+		public virtual bool AllowAutoRedirect {
 			get { return allowAutoRedirect; }
 			set { this.allowAutoRedirect = value; }
 		}
 		
-		public bool AllowWriteStreamBuffering {
+		public virtual bool AllowWriteStreamBuffering {
 			get { return allowBuffering; }
 			set { allowBuffering = value; }
 		}
@@ -240,20 +275,30 @@ namespace System.Net
 				method != "TRACE";
 			}
 		}
-		
+
+#if SECURITY_DEP
+		internal MonoTlsProvider TlsProvider {
+			get { return tlsProvider; }
+		}
+
+		internal MonoTlsSettings TlsSettings {
+			get { return tlsSettings; }
+		}
+#endif
+
 		public X509CertificateCollection ClientCertificates {
 			get {
 				if (certificates == null)
 					certificates = new X509CertificateCollection ();
-
 				return certificates;
 			}
-			[MonoTODO]
 			set {
-				throw GetMustImplement ();
+				if (value == null)
+					throw new ArgumentNullException ("value");
+				certificates = value;
 			}
 		}
-		
+
 		public string Connection {
 			get { return webHeaders ["Connection"]; }
 			set {
@@ -271,7 +316,7 @@ namespace System.Net
 				if (keepAlive)
 					value = value + ", Keep-Alive";
 				
-				webHeaders.RemoveAndAdd ("Connection", value);
+				webHeaders.CheckUpdate ("Connection", value);
 			}
 		}		
 		
@@ -301,11 +346,7 @@ namespace System.Net
 		public override string ContentType { 
 			get { return webHeaders ["Content-Type"]; }
 			set {
-				if (value == null || value.Trim().Length == 0) {
-					webHeaders.RemoveInternal ("Content-Type");
-					return;
-				}
-				webHeaders.RemoveAndAdd ("Content-Type", value);
+				SetSpecialHeaders ("Content-Type", value);
 			}
 		}
 		
@@ -332,14 +373,18 @@ namespace System.Net
 				return DateTime.ParseExact (date, "r", CultureInfo.InvariantCulture).ToLocalTime ();
 			}
 			set {
-				if (value.Equals (DateTime.MinValue))
-					webHeaders.RemoveInternal ("Date");
-				else
-					webHeaders.RemoveAndAdd ("Date", value.ToUniversalTime ().ToString ("r", CultureInfo.InvariantCulture));
+				SetDateHeaderHelper ("Date", value);
 			}
 		}
 
-#if !NET_2_1
+		void SetDateHeaderHelper(string headerName, DateTime dateTime) {
+			if (dateTime == DateTime.MinValue)
+				SetSpecialHeaders(headerName, null); // remove header
+			else
+				SetSpecialHeaders(headerName, HttpProtocolUtils.date2string(dateTime));
+		}
+
+#if !MOBILE
 		[MonoTODO]
 		public static new RequestCachePolicy DefaultCachePolicy
 		{
@@ -379,7 +424,8 @@ namespace System.Net
 				if (val == "100-continue")
 					throw new ArgumentException ("100-Continue cannot be set with this property.",
 								     "value");
-				webHeaders.RemoveAndAdd ("Expect", value);
+
+				webHeaders.CheckUpdate ("Expect", value);
 			}
 		}
 		
@@ -392,12 +438,21 @@ namespace System.Net
 			get { return webHeaders; }
 			set {
 				CheckRequestStarted ();
-				WebHeaderCollection newHeaders = new WebHeaderCollection (WebHeaderCollection.HeaderInfo.Request);
-				int count = value.Count;
-				for (int i = 0; i < count; i++) 
-					newHeaders.Add (value.GetKey (i), value.Get (i));
 
-				webHeaders = newHeaders;
+				WebHeaderCollection webHeaders = value;
+				WebHeaderCollection newWebHeaders = new WebHeaderCollection(WebHeaderCollectionType.HttpWebRequest);
+
+				// Copy And Validate -
+				// Handle the case where their object tries to change
+				//  name, value pairs after they call set, so therefore,
+				//  we need to clone their headers.
+				//
+
+				foreach (String headerName in webHeaders.AllKeys ) {
+					newWebHeaders.Add(headerName,webHeaders[headerName]);
+				}
+
+				this.webHeaders = newWebHeaders;
 			}
 		}
 		
@@ -558,6 +613,7 @@ namespace System.Net
 				CheckRequestStarted ();
 				proxy = value;
 				servicePoint = null; // we may need a new one
+				GetServicePoint ();
 			}
 		}
 		
@@ -628,7 +684,7 @@ namespace System.Net
 				if (!sendChunked)
 					throw new ArgumentException ("SendChunked must be True", "value");
 
-				webHeaders.RemoveAndAdd ("Transfer-Encoding", value);
+				webHeaders.CheckUpdate ("Transfer-Encoding", value);
 			}
 		}
 
@@ -666,7 +722,26 @@ namespace System.Net
 		internal bool ProxyQuery {
 			get { return servicePoint.UsesProxy && !servicePoint.UseConnect; }
 		}
-		
+
+		internal ServerCertValidationCallback ServerCertValidationCallback {
+			get { return certValidationCallback; }
+		}
+
+		public RemoteCertificateValidationCallback ServerCertificateValidationCallback {
+			get {
+				if (certValidationCallback == null)
+					return null;
+				return certValidationCallback.ValidationCallback;
+			}
+			set
+			{
+				if (value == null)
+					certValidationCallback = null;
+				else
+					certValidationCallback = new ServerCertValidationCallback (value);
+			}
+		}
+
 		// Methods
 		
 		internal ServicePoint GetServicePoint ()
@@ -717,7 +792,7 @@ namespace System.Net
 		{
 			if (rangeSpecifier == null)
 				throw new ArgumentNullException ("rangeSpecifier");
-			if (!WebHeaderCollection.IsHeaderValue (rangeSpecifier))
+			if (!WebHeaderCollection.IsValidToken (rangeSpecifier))
 				throw new ArgumentException ("Invalid range specifier", "rangeSpecifier");
 
 			string r = webHeaders ["Range"];
@@ -735,7 +810,7 @@ namespace System.Net
 				r = r + "0" + n;
 			else
 				r = r + n + "-";
-			webHeaders.RemoveAndAdd ("Range", r);
+			webHeaders.ChangeInternal ("Range", r);
 		}
 
 		public
@@ -743,7 +818,7 @@ namespace System.Net
 		{
 			if (rangeSpecifier == null)
 				throw new ArgumentNullException ("rangeSpecifier");
-			if (!WebHeaderCollection.IsHeaderValue (rangeSpecifier))
+			if (!WebHeaderCollection.IsValidToken (rangeSpecifier))
 				throw new ArgumentException ("Invalid range specifier", "rangeSpecifier");
 			if (from > to || from < 0)
 				throw new ArgumentOutOfRangeException ("from");
@@ -757,7 +832,7 @@ namespace System.Net
 				r += ",";
 
 			r = String.Format ("{0}{1}-{2}", r, from, to);
-			webHeaders.RemoveAndAdd ("Range", r);
+			webHeaders.ChangeInternal ("Range", r);
 		}
 
 		
@@ -845,6 +920,12 @@ namespace System.Net
 			return EndGetRequestStream (asyncResult);
 		}
 
+		[MonoTODO]
+		public Stream GetRequestStream (out TransportContext context)
+		{
+			throw new NotImplementedException ();
+		}
+
 		bool CheckIfForceWrite (SimpleAsyncResult result)
 		{
 			if (writeStream == null || writeStream.RequestWritten || !InternalAllowBuffering)
@@ -890,7 +971,7 @@ namespace System.Net
 			initialMethod = method;
 
 			SimpleAsyncResult.RunWithLock (locker, CheckIfForceWrite, inner => {
-				var synch = inner.CompletedSynchronously;
+				var synch = inner.CompletedSynchronouslyPeek;
 
 				if (inner.GotException) {
 					aread.SetCompleted (synch, inner.Exception);
@@ -915,11 +996,17 @@ namespace System.Net
 					}
 				}
 
-				if (!requestSent) {
+				if (requestSent)
+					return;
+
+				try {
 					requestSent = true;
 					redirects = 0;
 					servicePoint = GetServicePoint ();
 					abortHandler = servicePoint.SendRequest (this, connectionGroup);
+				} catch (Exception ex) {
+					aread.SetCompleted (synch, ex);
+					aread.DoCallback ();
 				}
 			});
 
@@ -946,9 +1033,9 @@ namespace System.Net
 			return result.Response;
 		}
 		
-		public Stream EndGetRequestStream (IAsyncResult asyncResult, out TransportContext transportContext)
+		public Stream EndGetRequestStream (IAsyncResult asyncResult, out TransportContext context)
 		{
-			transportContext = null;
+			context = null;
 			return EndGetRequestStream (asyncResult);
 		}
 
@@ -1137,7 +1224,7 @@ namespace System.Net
 			bool continue100 = false;
 			if (sendChunked) {
 				continue100 = true;
-				webHeaders.RemoveAndAdd ("Transfer-Encoding", "chunked");
+				webHeaders.ChangeInternal ("Transfer-Encoding", "chunked");
 				webHeaders.RemoveInternal ("Content-Length");
 			} else if (contentLength != -1) {
 				if (auth_state.NtlmAuthState == NtlmAuthState.Challenge || proxy_auth_state.NtlmAuthState == NtlmAuthState.Challenge) {
@@ -1160,7 +1247,7 @@ namespace System.Net
 
 			if (actualVersion == HttpVersion.Version11 && continue100 &&
 			    servicePoint.SendContinue) { // RFC2616 8.2.3
-				webHeaders.RemoveAndAdd ("Expect" , "100-continue");
+				webHeaders.ChangeInternal ("Expect" , "100-continue");
 				expectContinue = true;
 			} else {
 				webHeaders.RemoveInternal ("Expect");
@@ -1176,16 +1263,16 @@ namespace System.Net
 			if (keepAlive && (version == HttpVersion.Version10 || spoint10)) {
 				if (webHeaders[connectionHeader] == null
 				    || webHeaders[connectionHeader].IndexOf ("keep-alive", StringComparison.OrdinalIgnoreCase) == -1)
-					webHeaders.RemoveAndAdd (connectionHeader, "keep-alive");
+					webHeaders.ChangeInternal (connectionHeader, "keep-alive");
 			} else if (!keepAlive && version == HttpVersion.Version11) {
-				webHeaders.RemoveAndAdd (connectionHeader, "close");
+				webHeaders.ChangeInternal (connectionHeader, "close");
 			}
 
 			webHeaders.SetInternal ("Host", Host);
 			if (cookieContainer != null) {
 				string cookieHeader = cookieContainer.GetCookieHeader (actualUri);
 				if (cookieHeader != "")
-					webHeaders.RemoveAndAdd ("Cookie", cookieHeader);
+					webHeaders.ChangeInternal ("Cookie", cookieHeader);
 				else
 					webHeaders.RemoveInternal ("Cookie");
 			}
@@ -1196,7 +1283,7 @@ namespace System.Net
 			if ((auto_decomp & DecompressionMethods.Deflate) != 0)
 				accept_encoding = accept_encoding != null ? "gzip, deflate" : "deflate";
 			if (accept_encoding != null)
-				webHeaders.RemoveAndAdd ("Accept-Encoding", accept_encoding);
+				webHeaders.ChangeInternal ("Accept-Encoding", accept_encoding);
 
 			if (!usedPreAuth && preAuthenticate)
 				DoPreAuthenticate ();
@@ -1235,8 +1322,11 @@ namespace System.Net
 					msg = "Error: " + status;
 					wex = new WebException (msg, status);
 				} else {
-					msg = String.Format ("Error: {0} ({1})", status, exc.Message);
-					wex = new WebException (msg, exc, status);
+					wex = exc as WebException;
+					if (wex == null) {
+						msg = String.Format ("Error: {0} ({1})", status, exc.Message);
+						wex = new WebException (msg, status, WebExceptionInternalStatus.RequestFatal, exc);
+					}
 				}
 				r.SetCompleted (false, wex);
 				r.DoCallback ();
@@ -1295,7 +1385,7 @@ namespace System.Net
 					}
 
 					if (asyncWrite != null) {
-						asyncWrite.SetCompleted (inner.CompletedSynchronously, writeStream);
+						asyncWrite.SetCompleted (inner.CompletedSynchronouslyPeek, writeStream);
 						asyncWrite.DoCallback ();
 						asyncWrite = null;
 					}
@@ -1395,7 +1485,7 @@ namespace System.Net
 			if (wce != null) {
 				WebConnection cnc = wce.Connection;
 				cnc.PriorityRequest = this;
-				ICredentials creds = !isProxy ? credentials : proxy.Credentials;
+				ICredentials creds = (!isProxy || proxy == null) ? credentials : proxy.Credentials;
 				if (creds != null) {
 					cnc.NtlmCredential = creds.GetCredential (requestUri, "NTLM");
 					cnc.UnsafeAuthenticatedConnectionSharing = unsafe_auth_blah;
@@ -1452,7 +1542,7 @@ namespace System.Net
 					return;
 				}
 
-				bool isProxy = ProxyQuery && !proxy.IsBypassed (actualUri);
+				bool isProxy = ProxyQuery && proxy != null && !proxy.IsBypassed (actualUri);
 
 				bool redirected;
 				try {
@@ -1555,7 +1645,7 @@ namespace System.Net
 				if (isProxy && (request.proxy == null || request.proxy.Credentials == null))
 					return false;
 
-				string [] authHeaders = response.Headers.GetValues_internal (isProxy ? "Proxy-Authenticate" : "WWW-Authenticate", false);
+				string [] authHeaders = response.Headers.GetValues (isProxy ? "Proxy-Authenticate" : "WWW-Authenticate");
 				if (authHeaders == null || authHeaders.Length == 0)
 					return false;
 
@@ -1570,7 +1660,7 @@ namespace System.Net
 					return false;
 				request.webHeaders [isProxy ? "Proxy-Authorization" : "Authorization"] = auth.Message;
 				isCompleted = auth.Complete;
-				bool is_ntlm = (auth.Module.AuthenticationType == "NTLM");
+				bool is_ntlm = (auth.ModuleAuthenticationType == "NTLM");
 				if (is_ntlm)
 					ntlm_auth_state = (NtlmAuthState)((int) ntlm_auth_state + 1);
 				return true;
@@ -1714,6 +1804,22 @@ namespace System.Net
 		}
 
 		internal WebConnection StoredConnection;
+
+#region referencesource
+        internal static StringBuilder GenerateConnectionGroup(string connectionGroupName, bool unsafeConnectionGroup, bool isInternalGroup)
+        {
+            StringBuilder connectionLine = new StringBuilder(connectionGroupName);
+
+            connectionLine.Append(unsafeConnectionGroup ? "U>" : "S>");
+
+            if (isInternalGroup)
+            {
+                connectionLine.Append("I>");
+            }
+
+            return connectionLine;
+        }
+#endregion
 	}
 }
 

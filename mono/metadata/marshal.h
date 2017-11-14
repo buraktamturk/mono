@@ -1,6 +1,6 @@
-
-/*
- * marshal.h: Routines for marshaling complex types in P/Invoke methods.
+/**
+ * \file
+ * Routines for marshaling complex types in P/Invoke methods.
  * 
  * Author:
  *   Paolo Molaro (lupus@ximian.com)
@@ -19,6 +19,7 @@
 #include <mono/metadata/reflection.h>
 #include <mono/metadata/method-builder.h>
 #include <mono/metadata/remoting.h>
+#include <mono/utils/mono-error.h>
 
 #define mono_marshal_find_bitfield_offset(type, elem, byte_offset, bitmask) \
 	do { \
@@ -38,6 +39,7 @@ typedef struct {
 	MonoMethodPInvoke *piinfo;
 	int *orig_conv_args; /* Locals containing the original values of byref args */
 	int retobj_var;
+	int vtaddr_var;
 	MonoClass *retobj_class;
 	MonoMethodSignature *csig; /* Might need to be changed due to MarshalAs directives */
 	MonoImage *image; /* The image to use for looking up custom marshallers */
@@ -115,7 +117,11 @@ typedef enum {
 	WRAPPER_SUBTYPE_GENERIC_ARRAY_HELPER,
 	/* Subtypes of MONO_WRAPPER_DELEGATE_INVOKE */
 	WRAPPER_SUBTYPE_DELEGATE_INVOKE_VIRTUAL,
-	WRAPPER_SUBTYPE_DELEGATE_INVOKE_BOUND
+	WRAPPER_SUBTYPE_DELEGATE_INVOKE_BOUND,
+	/* Subtypes of MONO_WRAPPER_UNKNOWN */
+	WRAPPER_SUBTYPE_GSHAREDVT_IN_SIG,
+	WRAPPER_SUBTYPE_GSHAREDVT_OUT_SIG,
+	WRAPPER_SUBTYPE_INTERP_IN
 } WrapperSubtype;
 
 typedef struct {
@@ -147,6 +153,10 @@ typedef struct {
 
 typedef struct {
 	MonoMethod *method;
+} SynchronizedWrapperInfo;
+
+typedef struct {
+	MonoMethod *method;
 } SynchronizedInnerWrapperInfo;
 
 typedef struct {
@@ -164,6 +174,31 @@ typedef struct {
 typedef struct {
 	MonoClass *klass;
 } ProxyWrapperInfo;
+
+typedef struct {
+	const char *gc_name;
+	int alloc_type;
+} AllocatorWrapperInfo;
+
+typedef struct {
+	MonoMethod *method;
+} UnboxWrapperInfo;
+
+typedef struct {
+	MonoMethod *method;
+} RemotingWrapperInfo;
+
+typedef struct {
+	MonoMethodSignature *sig;
+} GsharedvtWrapperInfo;
+
+typedef struct {
+	MonoMethod *method;
+} DelegateInvokeWrapperInfo;
+
+typedef struct {
+	MonoMethodSignature *sig;
+} InterpInWrapperInfo;
 
 /*
  * This structure contains additional information to uniquely identify a given wrapper
@@ -185,6 +220,8 @@ typedef struct {
 		NativeToManagedWrapperInfo native_to_managed;
 		/* MONO_WRAPPER_MANAGED_TO_NATIVE */
 		ManagedToNativeWrapperInfo managed_to_native;
+		/* SYNCHRONIZED */
+		SynchronizedWrapperInfo synchronized;
 		/* SYNCHRONIZED_INNER */
 		SynchronizedInnerWrapperInfo synchronized_inner;
 		/* GENERIC_ARRAY_HELPER */
@@ -195,6 +232,18 @@ typedef struct {
 		ArrayAccessorWrapperInfo array_accessor;
 		/* PROXY_ISINST etc. */
 		ProxyWrapperInfo proxy;
+		/* ALLOC */
+		AllocatorWrapperInfo alloc;
+		/* UNBOX */
+		UnboxWrapperInfo unbox;
+		/* MONO_WRAPPER_REMOTING_INVOKE/MONO_WRAPPER_REMOTING_INVOKE_WITH_CHECK/MONO_WRAPPER_XDOMAIN_INVOKE */
+		RemotingWrapperInfo remoting;
+		/* GSHAREDVT_IN_SIG/GSHAREDVT_OUT_SIG */
+		GsharedvtWrapperInfo gsharedvt;
+		/* DELEGATE_INVOKE */
+		DelegateInvokeWrapperInfo delegate_invoke;
+		/* INTERP_IN */
+		InterpInWrapperInfo interp_in;
 	} d;
 } WrapperInfo;
 
@@ -230,54 +279,18 @@ int
 mono_type_native_stack_size (MonoType *type, guint32 *alignment);
 
 gpointer
-mono_array_to_savearray (MonoArray *array);
-
-gpointer
-mono_array_to_lparray (MonoArray *array);
-
-void
-mono_free_lparray (MonoArray *array, gpointer* nativeArray);
-
-void
-mono_string_utf8_to_builder (MonoStringBuilder *sb, char *text);
-
-void
-mono_string_utf16_to_builder (MonoStringBuilder *sb, gunichar2 *text);
-
-gchar*
-mono_string_builder_to_utf8 (MonoStringBuilder *sb);
-
-gunichar2*
-mono_string_builder_to_utf16 (MonoStringBuilder *sb);
-
-gpointer
 mono_string_to_ansibstr (MonoString *string_obj);
 
 gpointer
-mono_string_to_bstr (MonoString *string_obj);
-
-void
-mono_string_to_byvalstr (gpointer dst, MonoString *src, int size);
-
-void
-mono_string_to_byvalwstr (gpointer dst, MonoString *src, int size);
+mono_ptr_to_bstr (gpointer ptr, int slen);
 
 gpointer
-mono_delegate_to_ftnptr (MonoDelegate *delegate);
-
-MonoDelegate*
-mono_ftnptr_to_delegate (MonoClass *klass, gpointer ftn);
+mono_string_to_bstr(MonoString* str);
 
 void mono_delegate_free_ftnptr (MonoDelegate *delegate);
 
 void
 mono_marshal_set_last_error (void);
-
-gpointer
-mono_marshal_asany (MonoObject *obj, MonoMarshalNative string_encoding, int param_attrs);
-
-void
-mono_marshal_free_asany (MonoObject *o, gpointer ptr, MonoMarshalNative string_encoding, int param_attrs);
 
 guint
 mono_type_to_ldind (MonoType *type);
@@ -294,9 +307,9 @@ WrapperInfo*
 mono_wrapper_info_create (MonoMethodBuilder *mb, WrapperSubtype subtype);
 
 void
-mono_marshal_set_wrapper_info (MonoMethod *method, gpointer data);
+mono_marshal_set_wrapper_info (MonoMethod *method, WrapperInfo *info);
 
-gpointer
+WrapperInfo*
 mono_marshal_get_wrapper_info (MonoMethod *wrapper);
 
 MonoMethod *
@@ -312,16 +325,22 @@ MonoMethod *
 mono_marshal_get_delegate_invoke_internal (MonoMethod *method, gboolean callvirt, gboolean static_method_with_first_arg_bound, MonoMethod *target_method);
 
 MonoMethod *
+mono_marshal_get_runtime_invoke_full (MonoMethod *method, gboolean virtual_, gboolean need_direct_wrapper);
+
+MonoMethod *
 mono_marshal_get_runtime_invoke (MonoMethod *method, gboolean is_virtual);
 
 MonoMethod*
 mono_marshal_get_runtime_invoke_dynamic (void);
 
+MonoMethod *
+mono_marshal_get_runtime_invoke_for_sig (MonoMethodSignature *sig);
+
 MonoMethodSignature*
 mono_marshal_get_string_ctor_signature (MonoMethod *method);
 
 MonoMethod *
-mono_marshal_get_managed_wrapper (MonoMethod *method, MonoClass *delegate_klass, uint32_t this_loc);
+mono_marshal_get_managed_wrapper (MonoMethod *method, MonoClass *delegate_klass, uint32_t this_loc, MonoError *exernal_error);
 
 gpointer
 mono_marshal_get_vtfixup_ftnptr (MonoImage *image, guint32 token, guint16 type);
@@ -360,12 +379,6 @@ MonoMethod *
 mono_marshal_get_isinst_with_cache (void);
 
 MonoMethod *
-mono_marshal_get_isinst (MonoClass *klass);
-
-MonoMethod *
-mono_marshal_get_castclass (MonoClass *klass);
-
-MonoMethod *
 mono_marshal_get_stelemref (void);
 
 MonoMethod*
@@ -381,8 +394,7 @@ MonoMethod *
 mono_marshal_get_array_accessor_wrapper (MonoMethod *method);
 
 MonoMethod *
-mono_marshal_get_generic_array_helper (MonoClass *klass, MonoClass *iface,
-				       gchar *name, MonoMethod *method);
+mono_marshal_get_generic_array_helper (MonoClass *klass, gchar *name, MonoMethod *method);
 
 MonoMethod *
 mono_marshal_get_thunk_invoke_wrapper (MonoMethod *method);
@@ -405,7 +417,7 @@ mono_marshal_unlock_internal (void);
 /* marshaling internal calls */
 
 void * 
-mono_marshal_alloc (gulong size);
+mono_marshal_alloc (gsize size, MonoError *error);
 
 void 
 mono_marshal_free (gpointer ptr);
@@ -427,8 +439,8 @@ void
 ves_icall_System_Runtime_InteropServices_Marshal_copy_from_unmanaged (gpointer src, gint32 start_index,
 								      MonoArray *dest, gint32 length);
 
-MonoString *
-ves_icall_System_Runtime_InteropServices_Marshal_PtrToStringAnsi (char *ptr);
+MonoStringHandle
+ves_icall_System_Runtime_InteropServices_Marshal_PtrToStringAnsi (char *ptr, MonoError *error);
 
 MonoString *
 ves_icall_System_Runtime_InteropServices_Marshal_PtrToStringAnsi_len (char *ptr, gint32 len);
@@ -449,7 +461,7 @@ guint32
 ves_icall_System_Runtime_InteropServices_Marshal_GetLastWin32Error (void);
 
 guint32 
-ves_icall_System_Runtime_InteropServices_Marshal_SizeOf (MonoReflectionType *rtype);
+ves_icall_System_Runtime_InteropServices_Marshal_SizeOf (MonoReflectionTypeHandle rtype, MonoError *error);
 
 void
 ves_icall_System_Runtime_InteropServices_Marshal_StructureToPtr (MonoObject *obj, gpointer dst, MonoBoolean delete_old);
@@ -461,10 +473,13 @@ MonoObject *
 ves_icall_System_Runtime_InteropServices_Marshal_PtrToStructure_type (gpointer src, MonoReflectionType *type);
 
 int
-ves_icall_System_Runtime_InteropServices_Marshal_OffsetOf (MonoReflectionType *type, MonoString *field_name);
+ves_icall_System_Runtime_InteropServices_Marshal_OffsetOf (MonoReflectionTypeHandle type, MonoStringHandle field_name, MonoError *error);
 
 gpointer
 ves_icall_System_Runtime_InteropServices_Marshal_StringToBSTR (MonoString *string);
+
+gpointer
+ves_icall_System_Runtime_InteropServices_Marshal_BufferToBSTR (MonoArray *ptr, int len);
 
 gpointer
 ves_icall_System_Runtime_InteropServices_Marshal_StringToHGlobalAnsi (MonoString *string);
@@ -478,6 +493,9 @@ ves_icall_System_Runtime_InteropServices_Marshal_DestroyStructure (gpointer src,
 void*
 ves_icall_System_Runtime_InteropServices_Marshal_AllocCoTaskMem (int size);
 
+void*
+ves_icall_System_Runtime_InteropServices_Marshal_AllocCoTaskMemSize (gulong size);
+
 void
 ves_icall_System_Runtime_InteropServices_Marshal_FreeCoTaskMem (void *ptr);
 
@@ -485,10 +503,10 @@ gpointer
 ves_icall_System_Runtime_InteropServices_Marshal_ReAllocCoTaskMem (gpointer ptr, int size);
 
 void*
-ves_icall_System_Runtime_InteropServices_Marshal_AllocHGlobal (int size);
+ves_icall_System_Runtime_InteropServices_Marshal_AllocHGlobal (gpointer size);
 
 gpointer 
-ves_icall_System_Runtime_InteropServices_Marshal_ReAllocHGlobal (gpointer ptr, int size);
+ves_icall_System_Runtime_InteropServices_Marshal_ReAllocHGlobal (gpointer ptr, gpointer size);
 
 void
 ves_icall_System_Runtime_InteropServices_Marshal_FreeHGlobal (void *ptr);
@@ -499,8 +517,11 @@ ves_icall_System_Runtime_InteropServices_Marshal_FreeBSTR (void *ptr);
 void*
 ves_icall_System_Runtime_InteropServices_Marshal_UnsafeAddrOfPinnedArrayElement (MonoArray *arrayobj, int index);
 
-MonoDelegate*
-ves_icall_System_Runtime_InteropServices_Marshal_GetDelegateForFunctionPointerInternal (void *ftn, MonoReflectionType *type);
+MonoDelegateHandle
+ves_icall_System_Runtime_InteropServices_Marshal_GetDelegateForFunctionPointerInternal (void *ftn, MonoReflectionTypeHandle type, MonoError *error);
+
+gpointer
+ves_icall_System_Runtime_InteropServices_Marshal_GetFunctionPointerForDelegateInternal (MonoDelegateHandle delegate, MonoError *error);
 
 int
 ves_icall_System_Runtime_InteropServices_Marshal_AddRefInternal (gpointer pUnk);
@@ -590,7 +611,10 @@ void
 mono_marshal_use_aot_wrappers (gboolean use);
 
 MonoObject *
-mono_marshal_xdomain_copy_value (MonoObject *val);
+mono_marshal_xdomain_copy_value (MonoObject *val, MonoError *error);
+
+MonoObject *
+ves_icall_mono_marshal_xdomain_copy_value (MonoObject *val);
 
 int
 mono_mb_emit_save_args (MonoMethodBuilder *mb, MonoMethodSignature *sig, gboolean save_this);
@@ -606,6 +630,11 @@ MonoMethod*
 mono_mb_create_and_cache_full (GHashTable *cache, gpointer key,
 							   MonoMethodBuilder *mb, MonoMethodSignature *sig,
 							   int max_stack, WrapperInfo *info, gboolean *out_found);
+
+typedef void (*MonoFtnPtrEHCallback) (guint32 gchandle);
+
+MONO_API void
+mono_install_ftnptr_eh_callback (MonoFtnPtrEHCallback callback);
 
 G_END_DECLS
 

@@ -42,14 +42,13 @@ namespace System.Net
 {
 	public class ServicePoint
 	{
-		Uri uri;
+		readonly Uri uri;
 		int connectionLimit;
 		int maxIdleTime;
 		int currentConnections;
 		DateTime idleSince;
+		DateTime lastDnsResolve;
 		Version protocolVersion;
-		X509Certificate certificate;
-		X509Certificate clientCertificate;
 		IPHostEntry host;
 		bool usesProxy;
 		Dictionary<string,WebConnectionGroup> groups;
@@ -91,14 +90,6 @@ namespace System.Net
 			set { endPointCallback = value; }
 		}
 		
-		public X509Certificate Certificate {
-			get { return certificate; }
-		}
-		
-		public X509Certificate ClientCertificate {
-			get { return clientCertificate; }
-		}
-
 		[MonoTODO]
 		public int ConnectionLeaseTimeout
 		{
@@ -339,36 +330,45 @@ namespace System.Net
 			CheckAvailableForRecycling (out dummy);
 		}
 
+		private bool HasTimedOut
+		{
+			get {
+				int timeout = ServicePointManager.DnsRefreshTimeout;
+				return timeout != Timeout.Infinite &&
+					(lastDnsResolve + TimeSpan.FromMilliseconds (timeout)) < DateTime.UtcNow;
+			}
+		}
+
 		internal IPHostEntry HostEntry
 		{
 			get {
 				lock (hostE) {
-					if (host != null)
-						return host;
-
 					string uriHost = uri.Host;
 
-					// There is no need to do DNS resolution on literal IP addresses
-					if (uri.HostNameType == UriHostNameType.IPv6 ||
-						uri.HostNameType == UriHostNameType.IPv4) {
+					// Cannot do DNS resolution on literal IP addresses
+					if (uri.HostNameType == UriHostNameType.IPv6 || uri.HostNameType == UriHostNameType.IPv4) {
+						if (host != null)
+							return host;
 
 						if (uri.HostNameType == UriHostNameType.IPv6) {
 							// Remove square brackets
-							uriHost = uriHost.Substring(1,uriHost.Length-2);
+							uriHost = uriHost.Substring (1, uriHost.Length - 2);
 						}
 
 						// Creates IPHostEntry
 						host = new IPHostEntry();
-						host.AddressList = new IPAddress[] { IPAddress.Parse(uriHost) };
-
+						host.AddressList = new IPAddress[] { IPAddress.Parse (uriHost) };
 						return host;
 					}
 
-					// Try DNS resolution on host names
-					try  {
-						host = Dns.GetHostByName (uriHost);
-					} 
-					catch {
+					if (!HasTimedOut && host != null)
+						return host;
+
+					lastDnsResolve = DateTime.UtcNow;
+
+					try {
+						host = Dns.GetHostEntry (uriHost);
+					} catch {
 						return null;
 					}
 				}
@@ -419,10 +419,55 @@ namespace System.Net
 			return false;
 		}
 
-		internal void SetCertificates (X509Certificate client, X509Certificate server) 
+		//
+		// Copied from the referencesource
+		//
+
+		object m_ServerCertificateOrBytes;
+		object m_ClientCertificateOrBytes;
+
+		/// <devdoc>
+		///    <para>
+		///       Gets the certificate received for this <see cref='System.Net.ServicePoint'/>.
+		///    </para>
+		/// </devdoc>
+		public  X509Certificate Certificate {
+			get {
+				object chkCert = m_ServerCertificateOrBytes;
+				if (chkCert != null && chkCert.GetType() == typeof(byte[]))
+					return (X509Certificate)(m_ServerCertificateOrBytes = new X509Certificate((byte[]) chkCert));
+				else
+					return chkCert as X509Certificate;
+			}
+		}
+		internal void UpdateServerCertificate(X509Certificate certificate)
 		{
-			certificate = server;
-			clientCertificate = client;
+			if (certificate != null)
+				m_ServerCertificateOrBytes = certificate.GetRawCertData();
+			else
+				m_ServerCertificateOrBytes = null;
+		}
+
+		/// <devdoc>
+		/// <para>
+		/// Gets the Client Certificate sent by us to the Server.
+		/// </para>
+		/// </devdoc>
+		public  X509Certificate ClientCertificate {
+			get {
+				object chkCert = m_ClientCertificateOrBytes;
+				if (chkCert != null && chkCert.GetType() == typeof(byte[]))
+					return (X509Certificate)(m_ClientCertificateOrBytes = new X509Certificate((byte[]) chkCert));
+				else
+					return chkCert as X509Certificate;
+			}
+		}
+		internal void UpdateClientCertificate(X509Certificate certificate)
+		{
+			if (certificate != null)
+				m_ClientCertificateOrBytes = certificate.GetRawCertData();
+			else
+				m_ClientCertificateOrBytes = null;
 		}
 
 		internal bool CallEndPointDelegate (Socket sock, IPEndPoint remote)
@@ -459,6 +504,11 @@ namespace System.Net
 
 				return true;
 			}
+		}
+
+		internal Socket GetConnection(PooledStream PooledStream, object owner, bool async, out IPAddress address, ref Socket abortSocket, ref Socket abortSocket6)
+		{
+			throw new NotImplementedException ();
 		}
 	}
 }

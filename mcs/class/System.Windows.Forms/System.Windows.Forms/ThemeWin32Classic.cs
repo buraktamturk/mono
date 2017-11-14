@@ -207,8 +207,9 @@ namespace System.Windows.Forms
 		{
 			// Ensure that at least one line is going to get displayed.
 			// Line limit does not ensure that despite its description.
-			textBounds.Height = Math.Max (textBounds.Height, button.Font.Height);
-			
+			if (button.Font != null && button.Font.Height > 0)
+				textBounds.Height = Math.Max (textBounds.Height, button.Font.Height);
+
 			if (button.Enabled)
 				TextRenderer.DrawTextInternal (g, button.Text, button.Font, textBounds, button.ForeColor, button.TextFormatFlags, button.UseCompatibleTextRendering);
 			else
@@ -1563,8 +1564,8 @@ namespace System.Windows.Forms
 			Color back_color, fore_color;
 			Rectangle text_draw = e.Bounds;
 			StringFormat string_format = new StringFormat ();
-			string_format.FormatFlags = StringFormatFlags.LineLimit;
-			
+			string_format.FormatFlags = StringFormatFlags.LineLimit | StringFormatFlags.NoWrap;
+
 			if ((e.State & DrawItemState.Selected) == DrawItemState.Selected) {
 				back_color = ColorHighlight;
 				fore_color = ColorHighlightText;

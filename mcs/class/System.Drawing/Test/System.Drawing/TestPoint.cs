@@ -66,7 +66,9 @@ namespace MonoTests.System.Drawing{
 		[Test]
 		public void EqualityOpTest () 
 		{
+#pragma warning disable 1718 // Comparison made to same variable
 			Assert.IsTrue (pt1_1 == pt1_1, "#1");
+#pragma warning restore 1718
 			Assert.IsTrue (pt1_1 == new Point (1, 1), "#2");
 			Assert.IsTrue (!(pt1_1 == pt1_0), "#3");
 			Assert.IsTrue (!(pt1_1 == pt0_1), "#4");
@@ -76,7 +78,9 @@ namespace MonoTests.System.Drawing{
 		[Test]
 		public void InequalityOpTest () 
 		{
+#pragma warning disable 1718 // Comparison made to same variable
 			Assert.IsTrue (!(pt1_1 != pt1_1), "#1");
+#pragma warning restore 1718
 			Assert.IsTrue (!(pt1_1 != new Point (1, 1)), "#2");
 			Assert.IsTrue (pt1_1 != pt1_0, "#3");
 			Assert.IsTrue (pt1_1 != pt0_1, "#4");
@@ -154,6 +158,15 @@ namespace MonoTests.System.Drawing{
 			Assert.AreEqual (pt_i, pt_sz, "#1");
 			Assert.AreEqual (pt_i, pt1_1, "#2");
 			Assert.AreEqual (pt_sz, pt1_1, "#3");
+		}
+
+		[Test]
+		public void ConstructorNegativeLocationTest ()
+		{
+			var pt = new Point (unchecked ((int) 0xffe0fc00));
+
+			Assert.AreEqual (-32, pt.Y, "#1"); // (short) 0xffe0
+			Assert.AreEqual (-1024, pt.X, "#2"); // (short) 0xfc00
 		}
 		
 		[Test]

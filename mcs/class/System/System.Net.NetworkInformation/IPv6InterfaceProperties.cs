@@ -27,15 +27,7 @@
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //
 namespace System.Net.NetworkInformation {
-	public abstract class IPv6InterfaceProperties {
-		protected IPv6InterfaceProperties ()
-		{
-		}
-
-		public abstract int Index { get; }
-		public abstract int Mtu { get; }
-	}
-
+#if WIN_PLATFORM
 	class Win32IPv6InterfaceProperties : IPv6InterfaceProperties
 	{
 		Win32_MIB_IFROW mib;
@@ -53,5 +45,6 @@ namespace System.Net.NetworkInformation {
 			get { return mib.Mtu; }
 		}
 	}
+#endif
 }
 

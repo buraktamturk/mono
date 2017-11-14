@@ -44,8 +44,9 @@ class T {
     }
 
     static void Main (string[] args) {
-        
-        for (int j = 0; j < 2; j++)
+        int iterations = 0;
+
+        for (TestTimeout timeout = TestTimeout.Start(TimeSpan.FromSeconds(TestTimeout.IsStressTest ? 120 : 5)); timeout.HaveTimeLeft;)
         {
             count = 0;
 
@@ -82,6 +83,7 @@ class T {
             {
                 while (count < num_threads)
                 {
+                    Console.Write (".");
                     Monitor.Wait(count_lock);
                 }
             }
@@ -90,6 +92,11 @@ class T {
             {
                 t.Join();
             }
+
+            Console.WriteLine ();
+            iterations += 1;
         }
+
+        Console.WriteLine ($"done {iterations} iterations");
     }
 }

@@ -60,6 +60,7 @@ namespace System
 		private object m_target;
 		private IntPtr method;
 		private IntPtr delegate_trampoline;
+		private IntPtr extra_arg;
 		private IntPtr method_code;
 		private MethodInfo method_info;
 
@@ -68,6 +69,8 @@ namespace System
 		private MethodInfo original_method_info;
 
 		private DelegateData data;
+
+		private bool method_is_virtual;
 #pragma warning restore 169, 414, 649
 		#endregion
 
@@ -99,16 +102,12 @@ namespace System
 
 		public MethodInfo Method {
 			get {
-				if (method_info != null) {
-					return method_info;
-				} else {
-					if (method != IntPtr.Zero) {
-						method_info = (MethodInfo)MethodBase.GetMethodFromHandleNoGenericCheck (new RuntimeMethodHandle (method));
-					}
-					return method_info;
-				}
+				return GetMethodImpl ();
 			}
 		}
+
+		[MethodImplAttribute (MethodImplOptions.InternalCall)]
+		extern MethodInfo GetVirtualMethod_internal ();
 
 		public object Target {
 			get {
@@ -467,13 +466,15 @@ namespace System
 			return MemberwiseClone ();
 		}
 
-		internal bool Compare (Delegate d)
+		public override bool Equals (object obj)
 		{
+			Delegate d = obj as Delegate;
+
 			if (d == null)
 				return false;
-			
+
 			// Do not compare method_ptr, since it can point to a trampoline
-			if (d.m_target == m_target && d.method == method) {
+			if (d.m_target == m_target && d.Method == Method) {
 				if (d.data != null || data != null) {
 					/* Uncommon case */
 					if (d.data != null && data != null)
@@ -492,19 +493,28 @@ namespace System
 			return false;
 		}
 
-		public override bool Equals (object obj)
-		{
-			return Compare (obj as Delegate);
-		}
-
 		public override int GetHashCode ()
 		{
-			return method.GetHashCode () ^ (m_target != null ? m_target.GetHashCode () : 0);
+			MethodInfo m;
+
+			m = Method;
+
+			return (m != null ? m.GetHashCode () : GetType ().GetHashCode ()) ^ RuntimeHelpers.GetHashCode (m_target);
 		}
 
 		protected virtual MethodInfo GetMethodImpl ()
 		{
-			return Method;
+			if (method_info != null) {
+				return method_info;
+			} else {
+				if (method != IntPtr.Zero) {
+					if (!method_is_virtual)
+						method_info = (MethodInfo)MethodBase.GetMethodFromHandleNoGenericCheck (new RuntimeMethodHandle (method));
+					else
+						method_info = GetVirtualMethod_internal ();
+				}
+				return method_info;
+			}
 		}
 
 		// This is from ISerializable
@@ -526,6 +536,12 @@ namespace System
 		{
 			if (a == null)
 				return b;
+
+			if (b == null)
+				return a;
+
+			if (a.GetType () != b.GetType ())
+				throw new ArgumentException (Locale.GetText ("Incompatible Delegate Types. First is {0} second is {1}.", a.GetType ().FullName, b.GetType ().FullName));
 
 			return a.CombineImpl (b);
 		}

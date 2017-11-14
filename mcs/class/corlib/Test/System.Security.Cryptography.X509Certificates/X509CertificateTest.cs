@@ -37,7 +37,6 @@ public void SetUp () {
 [TearDown]
 public void TearDown () {
 	Thread.CurrentThread.CurrentCulture = oldcult;
-	File.Delete("temp.b64");
 	try {
 		File.Delete (temp_certificate_filename);
 	} catch {
@@ -487,6 +486,7 @@ public void Certificate6 ()
 // Certificate: basic\BADCERT.cer
 // - Bad certificate (will throw an exception)
 [Test]
+[Category ("MacNotWorking")] // SecCertificateCreateWithData does different things on 10.11 vs 10.12 with invalid certificates https://bugzilla.xamarin.com/show_bug.cgi?id=53689
 public void Certificate7 ()
 {
 	// cannot be loaded - will throw an exception

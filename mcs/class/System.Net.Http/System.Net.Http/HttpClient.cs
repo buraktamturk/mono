@@ -33,7 +33,7 @@ using System.IO;
 
 namespace System.Net.Http
 {
-	public class HttpClient : HttpMessageInvoker
+	public partial class HttpClient : HttpMessageInvoker
 	{
 		static readonly TimeSpan TimeoutDefault = TimeSpan.FromSeconds (100);
 
@@ -44,10 +44,12 @@ namespace System.Net.Http
 		long buffer_size;
 		TimeSpan timeout;
 
+#if !XAMARIN_MODERN
 		public HttpClient ()
 			: this (new HttpClientHandler (), true)
 		{
 		}
+#endif
 		
 		public HttpClient (HttpMessageHandler handler)
 			: this (handler, true)
@@ -94,7 +96,7 @@ namespace System.Net.Http
 				return timeout;
 			}
 			set {
-				if (value != System.Threading.Timeout.InfiniteTimeSpan && value < TimeSpan.Zero)
+				if (value != System.Threading.Timeout.InfiniteTimeSpan && (value <= TimeSpan.Zero || value.TotalMilliseconds > int.MaxValue))
 					throw new ArgumentOutOfRangeException ();
 
 				timeout = value;

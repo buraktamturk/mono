@@ -13,6 +13,7 @@ using System;
 using System.Collections;
 using System.IO;
 using System.Net;
+using System.Reflection;
 using System.Threading;
 
 namespace MonoTests.System.Net
@@ -22,6 +23,8 @@ namespace MonoTests.System.Net
 public class ServicePointTest
 {
 	static private int max;
+
+#if !FEATURE_NO_BSD_SOCKETS
 	[SetUp]
 	public void SaveMax () {
 		max = ServicePointManager.MaxServicePoints;
@@ -32,9 +35,10 @@ public class ServicePointTest
 	public void RestoreMax () {
 		ServicePointManager.MaxServicePoints = max;
 	}
+#endif
 
         [Test]
-		[Category ("InetAccess")]
+		[Category ("NotWorking")]
         public void All ()
         {
 		ServicePoint p = ServicePointManager.FindServicePoint (new Uri ("mailto:xx@yyy.com"));
@@ -120,7 +124,7 @@ public class ServicePointTest
 	// while ConnectionLimit equals 2
 
 	[Test]
-	[Category ("InetAccess")]
+	[Category ("NotWorking")]
 	public void ConnectionLimit ()
 	{		
 		// the default is already 2, just in case it isn't..
@@ -152,8 +156,7 @@ public class ServicePointTest
 	}
 
 	[Test]
-	[Category ("InetAccess")]
-	[Category ("AndroidNotWorking")] // #A1 fails
+	[Category ("NotWorking")] // #A1 fails
 	public void EndPointBind ()
 	{
 		Uri uri = new Uri ("http://www.go-mono.com/");
@@ -188,6 +191,10 @@ public class ServicePointTest
 	}
 
 	[Test] //Covers #19823
+#if FEATURE_NO_BSD_SOCKETS
+	// This test uses HttpWebRequest
+	[ExpectedException (typeof (PlatformNotSupportedException))]
+#endif
 	public void CloseConnectionGroupConcurency ()
 	{
 		// Try with multiple service points
@@ -203,6 +210,37 @@ public class ServicePointTest
 			Thread.Sleep (1);
 			req.ServicePoint.CloseConnectionGroup (req.ConnectionGroupName);
 		}
+	}
+
+
+	[Test]
+	[Category ("RequiresBSDSockets")] // Tests internals, so it doesn't make sense to assert that PlatformNotSupportedExceptions are thrown.
+	public void DnsRefreshTimeout ()
+	{
+		const int dnsRefreshTimeout = 2000;
+
+		ServicePoint sp;
+		IPHostEntry host0, host1, host2;
+		Uri uri;
+		PropertyInfo hostEntryProperty;
+
+		ServicePointManager.DnsRefreshTimeout = dnsRefreshTimeout;
+
+		uri = new Uri ("http://localhost/");
+		sp = ServicePointManager.FindServicePoint (uri);
+
+		hostEntryProperty = typeof (ServicePoint).GetProperty ("HostEntry", BindingFlags.NonPublic | BindingFlags.Instance);
+
+		host0 = hostEntryProperty.GetValue (sp, null) as IPHostEntry;
+		host1 = hostEntryProperty.GetValue (sp, null) as IPHostEntry;
+
+		Assert.AreSame (host0, host1, "HostEntry should result in the same IPHostEntry object.");
+
+		Thread.Sleep (dnsRefreshTimeout * 2);
+		host2 = hostEntryProperty.GetValue (sp, null) as IPHostEntry;
+
+		Assert.AreNotSame(host0, host2, "HostEntry should result in a new IPHostEntry " +
+				"object when DnsRefreshTimeout is reached.");
 	}
 
 // Debug code not used now, but could be useful later

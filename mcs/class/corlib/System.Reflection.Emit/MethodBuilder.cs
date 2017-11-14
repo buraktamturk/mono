@@ -138,6 +138,12 @@ namespace System.Reflection.Emit
 			}
 		}
 
+		internal RuntimeMethodHandle MethodHandleInternal {
+			get {
+				return mhandle;
+			}
+		}
+
 		public override Type ReturnType {
 			get { return rtype; }
 		}
@@ -248,6 +254,10 @@ namespace System.Reflection.Emit
 			return parameters [pos];
 		}
 
+		internal MethodBase RuntimeResolve () {
+			return type.RuntimeResolve ().GetMethod (this);
+		}
+
 		public Module GetModule ()
 		{
 			return type.Module;
@@ -332,7 +342,7 @@ namespace System.Reflection.Emit
 			//
 			// Extension: Mono allows position == 0 for the return attribute
 			//
-			if ((position < 0) || (position > parameters.Length))
+			if ((position < 0) || parameters == null || (position > parameters.Length))
 				throw new ArgumentOutOfRangeException ("position");
 
 			ParameterBuilder pb = new ParameterBuilder (this, position, attributes, strParamName);
@@ -364,7 +374,27 @@ namespace System.Reflection.Emit
 			if (ilgen != null)
 				ilgen.label_fixup (this);
 		}
-		
+
+		internal void ResolveUserTypes () {
+			rtype = TypeBuilder.ResolveUserType (rtype);
+			TypeBuilder.ResolveUserTypes (parameters);
+			TypeBuilder.ResolveUserTypes (returnModReq);
+			TypeBuilder.ResolveUserTypes (returnModOpt);
+			if (paramModReq != null) {
+				foreach (var types in paramModReq)
+					TypeBuilder.ResolveUserTypes (types);
+			}
+			if (paramModOpt != null) {
+				foreach (var types in paramModOpt)
+					TypeBuilder.ResolveUserTypes (types);
+			}
+		}
+
+		internal void FixupTokens (Dictionary<int, int> token_map, Dictionary<int, MemberInfo> member_map) {
+			if (ilgen != null)
+				ilgen.FixupTokens (token_map, member_map);
+		}
+
 		internal void GenerateDebugInfo (ISymbolWriter symbolWriter)
 		{
 			if (ilgen != null && ilgen.HasDebugInfo) {
@@ -478,7 +508,7 @@ namespace System.Reflection.Emit
 
 		public void AddDeclarativeSecurity (SecurityAction action, PermissionSet pset)
 		{
-#if !NET_2_1
+#if !MOBILE
 			if (pset == null)
 				throw new ArgumentNullException ("pset");
 			if ((action == SecurityAction.RequestMinimum) ||

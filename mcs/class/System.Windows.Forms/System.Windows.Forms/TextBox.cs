@@ -69,8 +69,8 @@ namespace System.Windows.Forms {
 			this.RightToLeftChanged += new EventHandler (TextBox_RightToLeftChanged);
 			MouseWheel += new MouseEventHandler (TextBox_MouseWheel);
 
-			BackColor = SystemColors.Window;
-			ForeColor = SystemColors.WindowText;
+			BackColor = ThemeEngine.Current.ColorControl;
+			ForeColor = ThemeEngine.Current.ColorControlText;
 			backcolor_set = false;
 
 			SetStyle (ControlStyles.StandardClick | ControlStyles.StandardDoubleClick, false);
@@ -450,6 +450,7 @@ namespace System.Windows.Forms {
 						document.PasswordChar = PasswordChar.ToString ();
 					else
 						document.PasswordChar = string.Empty;
+					this.CalculateDocument();
 					Invalidate ();
 				}
 			}
@@ -504,6 +505,7 @@ namespace System.Windows.Forms {
 						document.PasswordChar = string.Empty;
 					}
 					this.CalculateDocument();
+					Invalidate();
 				}
 			}
 		}

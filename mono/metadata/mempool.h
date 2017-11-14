@@ -1,3 +1,7 @@
+/**
+ * \file
+ */
+
 #ifndef _MONO_MEMPOOL_H_
 #define _MONO_MEMPOOL_H_
 
@@ -18,9 +22,6 @@ mono_mempool_destroy       (MonoMemPool *pool);
 
 MONO_API void
 mono_mempool_invalidate    (MonoMemPool *pool);
-
-MONO_API void
-mono_mempool_empty         (MonoMemPool *pool);
 
 MONO_API void
 mono_mempool_stats         (MonoMemPool *pool);

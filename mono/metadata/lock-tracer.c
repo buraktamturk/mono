@@ -1,5 +1,6 @@
-/*
- * lock-tracer.c: Runtime simple lock tracer
+/**
+ * \file
+ * Runtime simple lock tracer
  *
  * Authors:
  *	Rodrigo Kumpera (rkumpera@novell.com)
@@ -20,10 +21,9 @@
 #include <execinfo.h>
 #endif
 
-#include <mono/io-layer/io-layer.h>
+#include <mono/utils/mono-compiler.h>
 
 #include "lock-tracer.h"
-
 
 /*
  * This is a very simple lock trace implementation. It can be used to verify that the runtime is
@@ -31,8 +31,10 @@
  * 
  * To log more kind of locks just do the following:
  * 	- add an entry into the RuntimeLocks enum
- *  - change mono_mutex_lock(mutex) to mono_locks_acquire (mutex, LockName)
- *  - change mono_mutex_unlock to mono_locks_release (mutex, LockName)
+ *  - change mono_os_mutex_lock(mutex) to mono_locks_os_acquire (mutex, LockName)
+ *  - change mono_os_mutex_unlock(mutex) to mono_locks_os_release (mutex, LockName)
+ *  - change mono_coop_mutex_lock(mutex) to mono_locks_coop_acquire (mutex, LockName)
+ *  - change mono_coop_mutex_unlock(mutex) to mono_locks_coop_release (mutex, LockName)
  *  - change the decoder to understand the new lock kind.
  *
  * TODO:
@@ -71,9 +73,11 @@ mono_locks_tracer_init (void)
 	Dl_info info;
 	int res;
 	char *name;
-	mono_mutex_init_recursive (&tracer_lock);
-	if (!g_getenv ("MONO_ENABLE_LOCK_TRACER"))
+	mono_os_mutex_init_recursive (&tracer_lock);
+
+	if (!g_hasenv ("MONO_ENABLE_LOCK_TRACER"))
 		return;
+
 	name = g_strdup_printf ("locks.%d", getpid ());
 	trace_file = fopen (name, "w+");
 	g_free (name);
@@ -122,7 +126,7 @@ add_record (RecordType record_kind, RuntimeLocks kind, gpointer lock)
 		frames [i] = (gpointer)((size_t)frames[i] - base_address);
 
 	/*We only dump 5 frames, which should be more than enough to most analysis.*/
-	msg = g_strdup_printf ("%x,%d,%d,%p,%p,%p,%p,%p,%p\n", (guint32)GetCurrentThreadId (), record_kind, kind, lock, frames [1], frames [2], frames [3], frames [4], frames [5]);
+	msg = g_strdup_printf ("%x,%d,%d,%p,%p,%p,%p,%p,%p\n", (guint32)mono_native_thread_id_get (), record_kind, kind, lock, frames [1], frames [2], frames [3], frames [4], frames [5]);
 	fwrite (msg, strlen (msg), 1, trace_file);
 	fflush (trace_file);
 	g_free (msg);
@@ -139,5 +143,7 @@ mono_locks_lock_released (RuntimeLocks kind, gpointer lock)
 {
 	add_record (RECORD_LOCK_RELEASED, kind, lock);
 }
+#else
 
-#endif
+MONO_EMPTY_SOURCE_FILE (lock_tracer);
+#endif /* LOCK_TRACER */

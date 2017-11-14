@@ -29,9 +29,6 @@ using System.Threading;
 
 using NUnit;
 using NUnit.Framework;
-#if !MOBILE
-using NUnit.Framework.SyntaxHelpers;
-#endif
 
 namespace MonoTests.System.Threading
 {
@@ -193,6 +190,10 @@ namespace MonoTests.System.Threading
 		}
 
 		[Test]
+		[Category ("NotWorking")] // Finalizers aren't guaranteed
+#if MONOTOUCH
+		[Category ("NotWorking")] // https://bugzilla.xamarin.com/show_bug.cgi?id=34617
+#endif
 		public void DisposeOnThreadExit ()
 		{
 			var threadLocal = new ThreadLocal<SetMreOnFinalize>();
@@ -210,7 +211,7 @@ namespace MonoTests.System.Threading
 			}, 500);
 
 			if (!mres.IsSet)
-				Assert.Fail ();
+				Assert.Fail ("Finalizer didn't run after thread termination");
 		}
 	}
 }

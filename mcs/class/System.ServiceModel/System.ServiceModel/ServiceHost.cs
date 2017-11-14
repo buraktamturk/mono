@@ -45,12 +45,12 @@ namespace System.ServiceModel
 		{
 		}
 
-		public ServiceHost (object serviceInstance,
+		public ServiceHost (object singletonInstance,
 			params Uri [] baseAddresses)
 		{
-			if (serviceInstance == null)
-				throw new ArgumentNullException ("serviceInstance");
-			InitializeDescription (serviceInstance,
+			if (singletonInstance == null)
+				throw new ArgumentNullException ("singletonInstance");
+			InitializeDescription (singletonInstance,
 				new UriSchemeKeyedCollection (baseAddresses));
 		}
 
@@ -101,7 +101,9 @@ namespace System.ServiceModel
 			ContractDescription cd = GetExistingContract (implementedContract);
 			if (cd == null) {
 				cd = ContractDescription.GetContract (implementedContract);
-				contracts.Add (cd.ContractType.FullName, cd);
+				if (!contracts.ContainsKey (cd.ContractType.FullName)) {
+					contracts.Add (cd.ContractType.FullName, cd);
+				}
 			}
 
 			return AddServiceEndpointCore (cd, binding, ea, listenUri);
@@ -121,7 +123,8 @@ namespace System.ServiceModel
 			contracts = new Dictionary<string,ContractDescription> ();
 			implementedContracts = contracts;
 			ServiceDescription sd;
-			foreach (ContractDescription cd in GetServiceContractDescriptions())
+			IEnumerable<ContractDescription>  contractDescriptions = GetServiceContractDescriptions ();
+			foreach (ContractDescription cd in contractDescriptions)
 				contracts.Add (cd.ContractType.FullName, cd);
 
 			if (SingletonInstance != null) {
@@ -148,7 +151,7 @@ namespace System.ServiceModel
 
 		TAttr PopulateAttribute<TAttr> ()
 		{
-			object [] atts = service_type.GetCustomAttributes (typeof (TAttr), false);
+			object [] atts = service_type.GetCustomAttributes (typeof (TAttr), true);
 			return (TAttr) (atts.Length > 0 ? atts [0] : Activator.CreateInstance (typeof (TAttr)));
 		}
 
@@ -162,10 +165,10 @@ namespace System.ServiceModel
 			InitializeDescription (baseAddresses);
 		}
 
-		protected void InitializeDescription (object serviceInstance, UriSchemeKeyedCollection baseAddresses)
+		protected void InitializeDescription (object singletonInstance, UriSchemeKeyedCollection baseAddresses)
 		{
-			instance = serviceInstance;
-			InitializeDescription (serviceInstance.GetType (), baseAddresses);
+			instance = singletonInstance;
+			InitializeDescription (singletonInstance.GetType (), baseAddresses);
 		}
 	}
 }

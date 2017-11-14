@@ -27,6 +27,7 @@
 //
 
 using System;
+using System.Diagnostics;
 using System.Threading;
 using NUnit.Framework;
 
@@ -35,6 +36,25 @@ namespace MonoTests.System.Threading
 	[TestFixture]
 	public class ThreadPoolTests
 	{
+		int minWorkerThreads;
+		int minCompletionPortThreads;
+		int maxWorkerThreads;
+		int maxCompletionPortThreads;
+
+		[SetUp]
+		public void SetUp ()
+		{
+			ThreadPool.GetMinThreads (out minWorkerThreads, out minCompletionPortThreads);
+			ThreadPool.GetMaxThreads (out maxWorkerThreads, out maxCompletionPortThreads);
+		}
+
+		[TearDown]
+		public void TearDown ()
+		{
+			ThreadPool.SetMinThreads (minWorkerThreads, minCompletionPortThreads);
+			ThreadPool.SetMaxThreads (maxWorkerThreads, maxCompletionPortThreads);
+		}
+
 		[Test]
 		public void RegisterWaitForSingleObject_InvalidArguments ()
 		{
@@ -72,8 +92,8 @@ namespace MonoTests.System.Threading
 				else
 					ThreadPool.QueueUserWorkItem (_ => { Interlocked.Increment (ref sum); Interlocked.Increment (ref total); });
 			}
-			var start = DateTime.Now;
-			while ((total != n || sum != 0) && (DateTime.Now - start).TotalSeconds < 60)
+			var sw = Stopwatch.StartNew ();
+			while ((total != n || sum != 0) && sw.Elapsed.TotalSeconds < 60)
 				Thread.Sleep (1000);
 			Assert.IsTrue (total == n, "#1");
 			Assert.IsTrue (sum   == 0, "#2");
@@ -96,6 +116,105 @@ namespace MonoTests.System.Threading
 
 			ThreadPool.UnsafeQueueUserWorkItem (e, null);
 			Assert.IsTrue (ev.Wait (3000));
+		}
+
+		[Test]
+		public void SetAndGetMinThreads ()
+		{
+			int workerThreads, completionPortThreads;
+			int workerThreads_new, completionPortThreads_new;
+
+			ThreadPool.GetMinThreads (out workerThreads, out completionPortThreads);
+			Assert.IsTrue (workerThreads > 0, "#1");
+			Assert.IsTrue (completionPortThreads > 0, "#2");
+
+			workerThreads_new = workerThreads == 1 ? 2 : 1;
+			completionPortThreads_new = completionPortThreads == 1 ? 2 : 1;
+			ThreadPool.SetMinThreads (workerThreads_new, completionPortThreads_new);
+
+			ThreadPool.GetMinThreads (out workerThreads, out completionPortThreads);
+			Assert.IsTrue (workerThreads == workerThreads_new, "#3");
+			Assert.IsTrue (completionPortThreads == completionPortThreads_new, "#4");
+		}
+
+		[Test]
+		public void SetAndGetMaxThreads ()
+		{
+			int cpuCount = Environment.ProcessorCount;
+			int workerThreads, completionPortThreads;
+			int workerThreads_new, completionPortThreads_new;
+
+			ThreadPool.GetMaxThreads (out workerThreads, out completionPortThreads);
+			Assert.IsTrue (workerThreads > 0, "#1");
+			Assert.IsTrue (completionPortThreads > 0, "#2");
+
+			workerThreads_new = workerThreads == cpuCount ? cpuCount + 1 : cpuCount;
+			completionPortThreads_new = completionPortThreads == cpuCount ? cpuCount + 1 : cpuCount;
+			ThreadPool.SetMaxThreads (workerThreads_new, completionPortThreads_new);
+
+			ThreadPool.GetMaxThreads (out workerThreads, out completionPortThreads);
+			Assert.IsTrue (workerThreads == workerThreads_new, "#3");
+			Assert.IsTrue (completionPortThreads == completionPortThreads_new, "#4");
+		}
+		
+		[Test]
+		public void SetMaxPossibleThreads ()
+		{
+			var maxPossibleThreads = 0x7fff;
+			int maxWt, macCpt;
+
+			ThreadPool.SetMaxThreads (maxPossibleThreads, maxPossibleThreads);
+			ThreadPool.GetMaxThreads (out maxWt, out macCpt);
+			Assert.AreEqual (maxPossibleThreads, maxWt);
+			Assert.AreEqual (maxPossibleThreads, macCpt);
+
+			ThreadPool.SetMaxThreads (maxPossibleThreads + 1, maxPossibleThreads + 1);
+			ThreadPool.GetMaxThreads (out maxWt, out macCpt);
+			Assert.AreEqual (maxPossibleThreads, maxWt);
+			Assert.AreEqual (maxPossibleThreads, macCpt);
+		}
+
+		[Test]
+		public void GetAvailableThreads ()
+		{
+			ManualResetEvent mre = new ManualResetEvent (false);
+			var sw = Stopwatch.StartNew ();
+			int i, workerThreads, completionPortThreads;
+
+			try {
+				Assert.IsTrue (ThreadPool.SetMaxThreads (Environment.ProcessorCount, Environment.ProcessorCount));
+
+				while (true) {
+					ThreadPool.GetAvailableThreads (out workerThreads, out completionPortThreads);
+					if (workerThreads == 0)
+						break;
+
+					Console.WriteLine ("workerThreads = {0}, completionPortThreads = {1}", workerThreads, completionPortThreads);
+
+					if (sw.Elapsed.TotalSeconds >= 10)
+						Assert.Fail ("did not reach 0 available threads");
+
+					ThreadPool.QueueUserWorkItem (GetAvailableThreads_Callback, mre);
+					Thread.Sleep (1);
+				}
+			} finally {
+				mre.Set ();
+			}
+		}
+
+		void GetAvailableThreads_Callback (object state)
+		{
+			ManualResetEvent mre = (ManualResetEvent) state;
+
+			if (mre.WaitOne (0))
+				return;
+
+			ThreadPool.QueueUserWorkItem (GetAvailableThreads_Callback, mre);
+			ThreadPool.QueueUserWorkItem (GetAvailableThreads_Callback, mre);
+			ThreadPool.QueueUserWorkItem (GetAvailableThreads_Callback, mre);
+			ThreadPool.QueueUserWorkItem (GetAvailableThreads_Callback, mre);
+
+			mre.WaitOne ();
 		}
 	}
 }

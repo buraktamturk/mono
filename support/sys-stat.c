@@ -13,12 +13,14 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#ifdef HAVE_UNISTD_H
 #include <unistd.h>
+#endif
 #include <fcntl.h>
 #include <errno.h>
 
+#include "mph.h" /* Don't remove or move after map.h! Works around issues with Android SDK unified headers */
 #include "map.h"
-#include "mph.h"
 
 G_BEGIN_DECLS
 
@@ -30,16 +32,22 @@ Mono_Posix_FromStat (struct Mono_Posix_Stat *from, void *_to)
 
 	to->st_dev         = from->st_dev;
 	to->st_ino         = from->st_ino;
-	if (Mono_Posix_FromFilePermissions (from->st_mode, &to->st_mode) != 0) {
+
+	unsigned int to_st_mode;
+	if (Mono_Posix_FromFilePermissions (from->st_mode, &to_st_mode) != 0) {
 		return -1;
 	}
+
+	to->st_mode        = to_st_mode;
 	to->st_nlink       = from->st_nlink;
 	to->st_uid         = from->st_uid;
 	to->st_gid         = from->st_gid;
 	to->st_rdev        = from->st_rdev;
 	to->st_size        = from->st_size;
+#ifndef HOST_WIN32
 	to->st_blksize     = from->st_blksize;
 	to->st_blocks      = from->st_blocks;
+#endif
 	to->st_atime       = from->st_atime_;
 	to->st_mtime       = from->st_mtime_;
 	to->st_ctime       = from->st_ctime_;
@@ -72,8 +80,10 @@ Mono_Posix_ToStat (void *_from, struct Mono_Posix_Stat *to)
 	to->st_gid        = from->st_gid;
 	to->st_rdev       = from->st_rdev;
 	to->st_size       = from->st_size;
+#ifndef HOST_WIN32
 	to->st_blksize    = from->st_blksize;
 	to->st_blocks     = from->st_blocks;
+#endif
 	to->st_atime_     = from->st_atime;
 	to->st_mtime_     = from->st_mtime;
 	to->st_ctime_     = from->st_ctime;
@@ -122,6 +132,7 @@ Mono_Posix_Syscall_fstat (int filedes, struct Mono_Posix_Stat *buf)
 	return r;
 }
 
+#ifndef HOST_WIN32
 gint32
 Mono_Posix_Syscall_lstat (const char *file_name, struct Mono_Posix_Stat *buf)
 {
@@ -137,6 +148,7 @@ Mono_Posix_Syscall_lstat (const char *file_name, struct Mono_Posix_Stat *buf)
 		r = -1;
 	return r;
 }
+#endif
 
 #ifdef HAVE_FSTATAT
 gint32
@@ -159,6 +171,7 @@ Mono_Posix_Syscall_fstatat (gint32 dirfd, const char *file_name, struct Mono_Pos
 }
 #endif
 
+#ifndef HOST_WIN32
 gint32
 Mono_Posix_Syscall_mknod (const char *pathname, guint32 mode, mph_dev_t dev)
 {
@@ -166,6 +179,7 @@ Mono_Posix_Syscall_mknod (const char *pathname, guint32 mode, mph_dev_t dev)
 		return -1;
 	return mknod (pathname, mode, dev);
 }
+#endif
 
 #ifdef HAVE_MKNODAT
 gint32
@@ -199,6 +213,7 @@ Mono_Posix_Syscall_get_utime_omit ()
 #endif
 }
 
+#if defined(HAVE_FUTIMENS) || defined(HAVE_UTIMENSAT)
 static inline struct timespec*
 copy_utimens (struct timespec* to, struct Mono_Posix_Timespec *from)
 {
@@ -212,6 +227,7 @@ copy_utimens (struct timespec* to, struct Mono_Posix_Timespec *from)
 
 	return NULL;
 }
+#endif
 
 #ifdef HAVE_FUTIMENS
 gint32

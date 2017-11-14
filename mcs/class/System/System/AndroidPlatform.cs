@@ -33,6 +33,9 @@ using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
 #if SECURITY_DEP
 using MSX = Mono.Security.X509;
+#if MONO_FEATURE_BTLS
+using Mono.Btls;
+#endif
 #endif
 
 namespace System {
@@ -43,6 +46,7 @@ namespace System {
 		
 #if SECURITY_DEP
 		static readonly Converter<List <byte[]>, bool> trustEvaluateSsl;
+		static readonly Func<long, bool, byte[]> certStoreLookup;
 #endif  // SECURITY_DEP
 		static readonly Func<IWebProxy> getDefaultProxy;
 		static readonly GetInterfaceAddressesDelegate getInterfaceAddresses;
@@ -58,6 +62,14 @@ namespace System {
 							"TrustEvaluateSsl",
 							ignoreCase:false,
 							throwOnBindFailure:true);
+#if MONO_FEATURE_BTLS
+			certStoreLookup = (Func<long, bool, byte[]>)
+				Delegate.CreateDelegate (typeof (Func<long, bool, byte[]>),
+							t,
+							"CertStoreLookup",
+							ignoreCase:false,
+							throwOnBindFailure:true);
+#endif  // MONO_FEATURE_BTLS
 #endif  // SECURITY_DEP
 			getDefaultProxy = (Func<IWebProxy>)Delegate.CreateDelegate (
 				typeof (Func<IWebProxy>), t, "GetDefaultProxy",
@@ -76,13 +88,33 @@ namespace System {
 		}
 
 #if SECURITY_DEP
-		internal static bool TrustEvaluateSsl (MSX.X509CertificateCollection collection, object sender, X509Certificate2 certificate, X509Chain chain, SslPolicyErrors errors)
+		internal static bool TrustEvaluateSsl (X509CertificateCollection collection)
 		{
 			var certsRawData = new List <byte[]> (collection.Count);
-			foreach (MSX.X509Certificate cert in collection)
-				certsRawData.Add (cert.RawData);
+			foreach (var cert in collection)
+				certsRawData.Add (cert.GetRawCertData ());
 			return trustEvaluateSsl (certsRawData);
 		}
+
+#if MONO_FEATURE_BTLS
+		internal static MonoBtlsX509 CertStoreLookup (MonoBtlsX509Name name)
+		{
+			var hash = name.GetHash ();
+			var hashOld = name.GetHashOld ();
+			var result = certStoreLookup (hash, false);
+			if (result == null)
+				result = certStoreLookup (hashOld, false);
+			if (result == null)
+				result = certStoreLookup (hash, true);
+			if (result == null)
+				result = certStoreLookup (hashOld, true);
+
+			if (result == null)
+				return null;
+
+			return MonoBtlsX509.LoadFromData (result, MonoBtlsX509Format.DER);
+		}
+#endif  // MONO_FEATURE_BTLS
 #endif  // SECURITY_DEP
 
 		internal static IWebProxy GetDefaultProxy ()

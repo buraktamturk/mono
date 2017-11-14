@@ -128,6 +128,10 @@ namespace Microsoft.Build.Tasks {
 			relatedFiles = tempRelatedFiles.Values.ToArray ();
 			resolvedDependencyFiles = tempResolvedDepFiles.Values.ToArray ();
 
+#if XBUILD_14
+			DependsOnSystemRuntime = resolvedDependencyFiles.Any (x => Path.GetFileName (x.ItemSpec) == "System.Runtime.dll").ToString ();
+#endif
+
 			tempResolvedFiles.Clear ();
 			tempCopyLocalFiles.Clear ();
 			tempSatelliteFiles.Clear ();
@@ -626,6 +630,13 @@ namespace Microsoft.Build.Tasks {
 		public ITaskItem[] CopyLocalFiles {
 			get { return copyLocalFiles; }
 		}
+
+#if XBUILD_14
+		[Output]
+		public string DependsOnSystemRuntime {
+			get; private set;
+		}
+#endif
 		
 		[Output]
 		public ITaskItem[] FilesWritten {

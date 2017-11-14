@@ -1,5 +1,6 @@
-/*
- * mach-support-x86.c: mach support for x86
+/**
+ * \file
+ * mach support for x86
  *
  * Authors:
  *   Geoff Norton (gnorton@novell.com)
@@ -27,7 +28,7 @@ mono_mach_get_threads (thread_act_array_t *threads, guint32 *count)
 
 	do {
 		ret = task_threads (current_task (), threads, count);
-	} while (ret != KERN_SUCCESS);
+	} while (ret == KERN_ABORTED);
 
 	return ret;
 }

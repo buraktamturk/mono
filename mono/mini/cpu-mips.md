@@ -399,7 +399,6 @@ br_reg: src1:i len:8
 #ppc_subfze: dest:i src1:i len:4
 bigmul: len:52 dest:l src1:i src2:i
 bigmul_un: len:52 dest:l src1:i src2:i
-tls_get: len:8 dest:i
 mips_beq: src1:i src2:i len:24
 mips_bgez: src1:i len:24
 mips_bgtz: src1:i len:24
@@ -455,3 +454,5 @@ mips_cond_exc_iov: src1:i src2:i len:44
 mips_cond_exc_ino: src1:i src2:i len:44
 mips_cond_exc_ic: src1:i src2:i len:44
 mips_cond_exc_inc: src1:i src2:i len:44
+
+gc_safe_point: len:0

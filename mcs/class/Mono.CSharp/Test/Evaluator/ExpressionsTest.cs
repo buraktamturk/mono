@@ -84,6 +84,26 @@ namespace MonoTests.EvaluatorTest
 		}
 
 		[Test]
+		public void UsingWithError ()
+		{
+			try {
+				Evaluator.Run ("using System.DateTime;");
+				Assert.Fail ("#1");
+			} catch {
+			}
+
+			Evaluator.Evaluate ("1+1");
+		}
+
+		[Test]
+		public void UsingAlias ()
+		{
+			Evaluator.Run("using System;");
+			Evaluator.Run("using MyConsole = System.Console;");
+			Evaluator.Run("Console.WriteLine(\"Hello World\")");
+		}
+
+		[Test]
 		public void WithTypeBuilders ()
 		{
 			object res;
@@ -100,7 +120,8 @@ namespace MonoTests.EvaluatorTest
 			Evaluator.Run ("var a = new int[]{1,2,3};");
 
 			object res = Evaluator.Evaluate ("from x in a select x + 1;");
-			CollectionAssert.AreEqual (new int[] { 2, 3, 4 }, ((IEnumerable<int>) res).ToArray ());
+
+			Assert.AreEqual (new int[] { 2, 3, 4 }, ((IEnumerable<int>) res).ToArray ());
 		}
 
 		[Test]

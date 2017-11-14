@@ -139,7 +139,7 @@ namespace System.Threading
 				throw new ArgumentOutOfRangeException ("period");
 
 			if (disposed)
-				return false;
+				throw new ObjectDisposedException (null, Environment.GetResourceString ("ObjectDisposed_Generic"));
 
 			due_time_ms = dueTime;
 			period_ms = period;
@@ -166,7 +166,7 @@ namespace System.Threading
 			if (notifyObject == null)
 				throw new ArgumentNullException ("notifyObject");
 			Dispose ();
-			NativeEventCalls.SetEvent_internal (notifyObject.Handle);
+			NativeEventCalls.SetEvent (notifyObject.SafeWaitHandle);
 			return true;
 		}
 

@@ -59,7 +59,7 @@ namespace MonoTests.System.Threading.Tasks.Dataflow {
 
 			foreach (var block in blocks) {
 				var ae =
-					AssertEx.Throws<AggregateException> (() => block.Completion.Wait (100));
+					AssertEx.Throws<AggregateException> (() => block.Completion.Wait (1000));
 				Assert.AreEqual (1, ae.InnerExceptions.Count);
 				Assert.IsInstanceOfType (typeof(TaskCanceledException), ae.InnerExceptions [0]);
 				Assert.IsTrue (block.Completion.IsCanceled);
@@ -90,7 +90,7 @@ namespace MonoTests.System.Threading.Tasks.Dataflow {
 				var queue = new ConcurrentQueue<Tuple<int, int>> ();
 				var block = factory (queue);
 
-				Assert.IsEmpty (queue);
+				CollectionAssert.IsEmpty (queue);
 
 				for (int i = 0; i < 100; i++)
 					block.Post (i);
@@ -103,7 +103,7 @@ namespace MonoTests.System.Threading.Tasks.Dataflow {
 
 					source.LinkTo (new BufferBlock<int> ());
 				}
-				Assert.IsTrue (block.Completion.Wait (500));
+				Assert.IsTrue (block.Completion.Wait (1000));
 
 				CollectionAssert.AreEquivalent (
 					Enumerable.Range (0, 100), queue.Select (t => t.Item1));
@@ -170,15 +170,15 @@ namespace MonoTests.System.Threading.Tasks.Dataflow {
 
 				options = new ExecutionDataflowBlockOptions { MaxDegreeOfParallelism = 2 };
 				foreach (var taskIds in GetTaskIdsForExecutionsOptions (options))
-					Assert.LessOrEqual (CalculateDegreeOfParallelism (taskIds), 2);
+					AssertHelper.LessOrEqual (CalculateDegreeOfParallelism (taskIds), 2);
 
 				options = new ExecutionDataflowBlockOptions { MaxDegreeOfParallelism = 4 };
 				foreach (var taskIds in GetTaskIdsForExecutionsOptions (options))
-					Assert.LessOrEqual (CalculateDegreeOfParallelism (taskIds), 4);
+					AssertHelper.LessOrEqual (CalculateDegreeOfParallelism (taskIds), 4);
 
 				options = new ExecutionDataflowBlockOptions { MaxDegreeOfParallelism = -1 };
 				foreach (var taskIds in GetTaskIdsForExecutionsOptions (options))
-					Assert.LessOrEqual (CalculateDegreeOfParallelism (taskIds), taskIds.Length);
+					AssertHelper.LessOrEqual (CalculateDegreeOfParallelism (taskIds), taskIds.Length);
 			}
 		}
 
@@ -187,7 +187,7 @@ namespace MonoTests.System.Threading.Tasks.Dataflow {
 		{
 			var options = new ExecutionDataflowBlockOptions ();
 			foreach (var taskIds in GetTaskIdsForExecutionsOptions (options))
-				Assert.GreaterOrEqual (taskIds.Distinct ().Count (), 1);
+				AssertHelper.GreaterOrEqual (taskIds.Distinct ().Count (), 1);
 
 			options = new ExecutionDataflowBlockOptions { MaxMessagesPerTask = 1 };
 			foreach (var taskIds in GetTaskIdsForExecutionsOptions (options))
@@ -195,11 +195,11 @@ namespace MonoTests.System.Threading.Tasks.Dataflow {
 
 			options = new ExecutionDataflowBlockOptions { MaxMessagesPerTask = 2 };
 			foreach (var taskIds in GetTaskIdsForExecutionsOptions (options))
-				Assert.GreaterOrEqual (taskIds.Distinct ().Count (), taskIds.Length / 2);
+				AssertHelper.GreaterOrEqual (taskIds.Distinct ().Count (), taskIds.Length / 2);
 
 			options = new ExecutionDataflowBlockOptions { MaxMessagesPerTask = 4 };
 			foreach (var taskIds in GetTaskIdsForExecutionsOptions (options))
-				Assert.GreaterOrEqual (taskIds.Distinct ().Count (), taskIds.Length / 4);
+				AssertHelper.GreaterOrEqual (taskIds.Distinct ().Count (), taskIds.Length / 4);
 		}
 
 		[Test]
@@ -243,7 +243,7 @@ namespace MonoTests.System.Threading.Tasks.Dataflow {
 
 			Assert.IsNotNull (action);
 
-			Assert.IsTrue (action.Completion.Wait (100));
+			Assert.IsTrue (action.Completion.Wait (1000));
 			Assert.IsTrue (task.Wait (0));
 		}
 
@@ -405,7 +405,7 @@ namespace MonoTests.System.Threading.Tasks.Dataflow {
 
 			evt.Set ();
 
-			Assert.IsTrue (Task.WaitAll (new Task[] { task1, task2 }, 100));
+			Assert.IsTrue (Task.WaitAll (new Task[] { task1, task2 }, 1000));
 
 			CollectionAssert.AreEquivalent (
 				new[]

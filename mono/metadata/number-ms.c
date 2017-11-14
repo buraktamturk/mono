@@ -1,10 +1,12 @@
-/*
- * number-ms.c: System.Double, System.Single and System.Number runtime support
+/**
+ * \file
+ * System.Double, System.Single and System.Number runtime support
  *
  * Author:
  *	Ludovic Henry (ludovic@xamarin.com)
  *
  * Copyright 2015 Xamarin, Inc (http://www.xamarin.com)
+ * Licensed under the MIT license. See LICENSE file in the project root for full license information.
  */
 
 //
@@ -194,8 +196,6 @@ number_to_double (MonoNumber *number, gdouble *value)
 	guint64 val;
 	guint16 *src;
 	gint exp, remaining, total, count, scale, absscale, index;
-
-	g_assert (number->digits);
 
 	total = 0;
 	src = number->digits;

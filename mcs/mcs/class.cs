@@ -22,7 +22,7 @@ using System.Text;
 using System.Diagnostics;
 using Mono.CompilerServices.SymbolWriter;
 
-#if NET_2_1
+#if MOBILE
 using XmlElement = System.Object;
 #endif
 
@@ -92,7 +92,7 @@ namespace Mono.CSharp
 		}
 
 		//
-		// Any unattached attributes during parsing get added here. User
+		// Any unattached attributes during parsing get added here. Used
 		// by FULL_AST mode
 		//
 		public Attributes UnattachedAttributes {
@@ -224,6 +224,24 @@ namespace Mono.CSharp
 			}
 		}
 
+		public void CloseContainerEarlyForReflectionEmit ()
+		{
+			if (containers != null) {
+				foreach (TypeContainer tc in containers) {
+					//
+					// SRE requires due to internal checks that any field of enum type is
+					// baked. We close all enum types before closing any other types to
+					// workaround this limitation
+					//
+					if (tc.Kind == MemberKind.Enum) {
+						tc.CloseContainer ();
+					} else {
+						tc.CloseContainerEarlyForReflectionEmit ();
+					}
+				}
+			}
+		}
+
 		public virtual void CreateMetadataName (StringBuilder sb)
 		{
 			if (Parent != null && Parent.MemberName != null)
@@ -296,6 +314,10 @@ namespace Mono.CSharp
 
 						throw new InternalErrorException (tc, e);
 					}
+				}
+
+				if (PartialContainer != null && PartialContainer != this) {
+					containers = null;
 				}
 			}
 
@@ -530,7 +552,6 @@ namespace Mono.CSharp
 
 		bool has_normal_indexers;
 		string indexer_name;
-		protected bool requires_delayed_unmanagedtype_check;
 		bool error;
 		bool members_defined;
 		bool members_defined_ok;
@@ -633,6 +654,15 @@ namespace Mono.CSharp
 			}
 			set {
 				caching_flags |= Flags.HasInstanceConstructor;
+			}
+		}
+
+		public bool HasInstanceField {
+			get {
+				return (caching_flags & Flags.HasInstanceField) != 0;
+			}
+			set {
+				caching_flags |= Flags.HasInstanceField;
 			}
 		}
 
@@ -845,18 +875,22 @@ namespace Mono.CSharp
 			if ((field.ModFlags & Modifiers.STATIC) != 0)
 				return true;
 
-			var first_field = PartialContainer.first_nonstatic_field;
-			if (first_field == null) {
+			if (!PartialContainer.HasInstanceField) {
+				PartialContainer.HasInstanceField = true;
 				PartialContainer.first_nonstatic_field = field;
 				return true;
 			}
 
-			if (Kind == MemberKind.Struct && first_field.Parent != field.Parent) {
-				Report.SymbolRelatedToPreviousError (first_field.Parent);
-				Report.Warning (282, 3, field.Location,
-					"struct instance field `{0}' found in different declaration from instance field `{1}'",
-					field.GetSignatureForError (), first_field.GetSignatureForError ());
+			if (Kind == MemberKind.Struct) {
+				var first_field = PartialContainer.first_nonstatic_field;
+				if (first_field.Parent != field.Parent) {
+					Report.SymbolRelatedToPreviousError (first_field.Parent);
+					Report.Warning (282, 3, field.Location,
+						"struct instance field `{0}' found in different declaration from instance field `{1}'",
+						field.GetSignatureForError (), first_field.GetSignatureForError ());
+				}
 			}
+
 			return true;
 		}
 
@@ -941,7 +975,8 @@ namespace Mono.CSharp
 
 		TypeParameterSpec[] ITypeDefinition.TypeParameters {
 			get {
-				return PartialContainer.CurrentTypeParameters.Types;
+				var ctp = PartialContainer.CurrentTypeParameters;
+				return ctp == null ? TypeParameterSpec.EmptyTypes : ctp.Types;
 			}
 		}
 
@@ -1295,7 +1330,7 @@ namespace Mono.CSharp
 			//
 			// Sets .size to 1 for structs with no instance fields
 			//
-			int type_size = Kind == MemberKind.Struct && first_nonstatic_field == null && !(this is StateMachine) ? 1 : 0;
+			int type_size = Kind == MemberKind.Struct && !HasInstanceField && !(this is StateMachine) ? 1 : 0;
 
 			var parent_def = Parent as TypeDefinition;
 			if (parent_def == null) {
@@ -1439,7 +1474,11 @@ namespace Mono.CSharp
 					targs.Arguments = new TypeSpec[hoisted_tparams.Length];
 					for (int i = 0; i < hoisted_tparams.Length; ++i) {
 						var tp = hoisted_tparams[i];
-						var local_tp = new TypeParameter (tp, null, new MemberName (tp.Name, Location), null);
+						var tp_name = tp.Name;
+#if DEBUG
+						tp_name += "_Proxy";
+#endif
+						var local_tp = new TypeParameter (tp, null, new MemberName (tp_name, Location), null);
 						tparams.Add (local_tp);
 
 						targs.Add (new SimpleName (tp.Name, Location));
@@ -1455,6 +1494,12 @@ namespace Mono.CSharp
 					var mutator = new TypeParameterMutator (hoisted_tparams, tparams);
 					return_type = mutator.Mutate (return_type);
 					local_param_types = mutator.Mutate (local_param_types);
+
+					var inflator = new TypeParameterInflator (this, null, hoisted_tparams, targs.Arguments);
+					for (int i = 0; i < hoisted_tparams.Length; ++i) {
+						var tp_spec = (TypeParameterSpec) targs.Arguments [i];
+						tp_spec.InflateConstraints (inflator, tp_spec);
+					}
 				} else {
 					member_name = new MemberName (name);
 				}
@@ -1467,7 +1512,7 @@ namespace Mono.CSharp
 					base_parameters[i].Resolve (this, i);
 				}
 
-				var cloned_params = ParametersCompiled.CreateFullyResolved (base_parameters, method.Parameters.Types);
+				var cloned_params = ParametersCompiled.CreateFullyResolved (base_parameters, local_param_types);
 				if (method.Parameters.HasArglist) {
 					cloned_params.FixedParameters[0] = new Parameter (null, "__arglist", Parameter.Modifier.NONE, null, Location);
 					cloned_params.Types[0] = Module.PredefinedTypes.RuntimeArgumentHandle.Resolve ();
@@ -1661,6 +1706,8 @@ namespace Mono.CSharp
 
 		public override void ExpandBaseInterfaces ()
 		{
+			DoResolveTypeParameters ();
+
 			if (!IsPartialPart)
 				DoExpandBaseInterfaces ();
 
@@ -1766,8 +1813,6 @@ namespace Mono.CSharp
 		protected override void DoDefineContainer ()
 		{
 			DefineBaseTypes ();
-
-			DoResolveTypeParameters ();
 		}
 
 		//
@@ -1791,8 +1836,10 @@ namespace Mono.CSharp
 			this.spec = spec;
 			current_type = null;
 			if (class_partial_parts != null) {
-				foreach (var part in class_partial_parts)
+				foreach (var part in class_partial_parts) {
 					part.spec = spec;
+					part.current_type = null;
+				}
 			}
 		}
 
@@ -1853,7 +1900,7 @@ namespace Mono.CSharp
 					return base_type;
 			}
 
-			if (iface_exprs != null) {
+			if (iface_exprs != null && this is Interface) {
 				foreach (var iface in iface_exprs) {
 					// the interface might not have been resolved, prevents a crash, see #442144
 					if (iface == null)
@@ -1999,15 +2046,6 @@ namespace Mono.CSharp
 				CheckPairedOperators ();
 			}
 
-			if (requires_delayed_unmanagedtype_check) {
-				requires_delayed_unmanagedtype_check = false;
-				foreach (var member in members) {
-					var f = member as Field;
-					if (f != null && f.MemberType != null && f.MemberType.IsPointer)
-						TypeManager.VerifyUnmanaged (Module, f.MemberType, f.Location);
-				}
-			}
-
 			ComputeIndexerName();
 
 			if (HasEquals && !HasGetHashCode) {
@@ -2151,6 +2189,14 @@ namespace Mono.CSharp
 
 		public override void Emit ()
 		{
+			if (Interfaces != null) {
+				foreach (var iface in Interfaces) {
+					if (iface.HasNamedTupleElement) {
+						throw new NotImplementedException ("named tuples for .interfaceimpl");
+					}
+				}
+			}
+
 			if (OptAttributes != null)
 				OptAttributes.Emit ();
 
@@ -2207,6 +2253,10 @@ namespace Mono.CSharp
 				Module.PredefinedAttributes.CompilerGenerated.EmitAttribute (TypeBuilder);
 
 #if STATIC
+			if (Kind == MemberKind.Struct && !HasStructLayout && HasInstanceField) {
+				TypeBuilder.__SetLayout (0, 0);
+			}
+
 			if ((TypeBuilder.Attributes & TypeAttributes.StringFormatMask) == 0 && Module.HasDefaultCharSet)
 				TypeBuilder.__SetAttributes (TypeBuilder.Attributes | Module.DefaultCharSetType);
 #endif
@@ -2392,7 +2442,7 @@ namespace Mono.CSharp
 			var ifaces = PartialContainer.Interfaces;
 			if (ifaces != null) {
 				foreach (TypeSpec t in ifaces){
-					if (t == mb.InterfaceType)
+					if (t == mb.InterfaceType || t == null)
 						return true;
 
 					var expanded_base = t.Interfaces;
@@ -2509,7 +2559,7 @@ namespace Mono.CSharp
 			//	return null;
 
 			var container = PartialContainer.CurrentType;
-			return MemberCache.FindNestedType (container, name, arity);
+			return MemberCache.FindNestedType (container, name, arity, false);
 		}
 
 		public void Mark_HasEquals ()
@@ -2711,6 +2761,22 @@ namespace Mono.CSharp
 			return true;
 		}
 
+		public override void PrepareEmit ()
+		{
+			var s = this as Struct;
+			if (s == null || !s.HasUnmanagedCheckDone) {
+				for (int i = 0; i < Members.Count; ++i) {
+					var f = Members [i] as Field;
+					if (f == null || f.MemberType == null || !f.MemberType.IsPointer)
+						continue;
+
+					TypeManager.VerifyUnmanaged (Module, f.MemberType, f.Location);
+				}
+			}
+
+			base.PrepareEmit ();
+		}
+
 		public override void Emit ()
 		{
 			if (!has_static_constructor && HasStaticFieldInitializer) {
@@ -2861,8 +2927,11 @@ namespace Mono.CSharp
 			if ((ModFlags & Modifiers.METHOD_EXTENSION) != 0)
 				Module.PredefinedAttributes.Extension.EmitAttribute (TypeBuilder);
 
-			if (base_type != null && base_type.HasDynamicElement) {
-				Module.PredefinedAttributes.Dynamic.EmitAttribute (TypeBuilder, base_type, Location);
+			if (base_type != null) {
+				if (base_type.HasDynamicElement)
+					Module.PredefinedAttributes.Dynamic.EmitAttribute (TypeBuilder, base_type, Location);
+				if (base_type.HasNamedTupleElement)
+					Module.PredefinedAttributes.TupleElementNames.EmitAttribute (TypeBuilder, base_type, Location);
 			}
 		}
 
@@ -2959,7 +3028,7 @@ namespace Mono.CSharp
 
 	public sealed class Struct : ClassOrStruct
 	{
-		bool is_unmanaged, has_unmanaged_check_done;
+		bool is_unmanaged, has_unmanaged_check_done, requires_delayed_unmanagedtype_check;
 		bool InTransit;
 
 		// <summary>
@@ -2971,7 +3040,8 @@ namespace Mono.CSharp
 			Modifiers.PROTECTED |
 			Modifiers.INTERNAL  |
 			Modifiers.UNSAFE    |
-			Modifiers.PRIVATE;
+			Modifiers.PRIVATE   |
+			Modifiers.READONLY;
 
 		public Struct (TypeContainer parent, MemberName name, Modifiers mod, Attributes attrs)
 			: base (parent, name, attrs, MemberKind.Struct)
@@ -3084,9 +3154,18 @@ namespace Mono.CSharp
 
 		public override void Emit ()
 		{
+			if ((ModFlags & Modifiers.READONLY) != 0)
+				Module.PredefinedAttributes.IsReadOnly.EmitAttribute (TypeBuilder);
+
 			CheckStructCycles ();
 
 			base.Emit ();
+		}
+
+		public bool HasUnmanagedCheckDone {
+			get {
+				return has_unmanaged_check_done;
+			}
 		}
 
 		bool HasUserDefaultConstructor ()
@@ -3117,7 +3196,7 @@ namespace Mono.CSharp
 				return false;
 			}
 
-			if (first_nonstatic_field != null) {
+			if (HasInstanceField) {
 				requires_delayed_unmanagedtype_check = true;
 
 				foreach (var member in Members) {
@@ -3467,10 +3546,13 @@ namespace Mono.CSharp
 				ok = false;
 			}
 
-			var base_member_type = ((IInterfaceMemberSpec) base_member).MemberType;
+			var base_member_type = ((IInterfaceMemberSpec)base_member).MemberType;
 			if (!TypeSpecComparer.Override.IsEqual (MemberType, base_member_type)) {
 				Report.SymbolRelatedToPreviousError (base_member);
-				if (this is PropertyBasedMember) {
+				if (((base_member_type.Kind ^ MemberType.Kind) & MemberKind.ByRef) != 0) {
+					Report.Error (8148, Location, "`{0}': must {2}return by reference to match overridden member `{1}'",
+					              GetSignatureForError (), base_member.GetSignatureForError (), base_member_type.Kind == MemberKind.ByRef ? "" : "not ");
+				} else if (this is PropertyBasedMember) {
 					Report.Error (1715, Location, "`{0}': type must be `{1}' to match overridden member `{2}'",
 						GetSignatureForError (), base_member_type.GetSignatureForError (), base_member.GetSignatureForError ());
 				} else {
@@ -3478,6 +3560,20 @@ namespace Mono.CSharp
 						GetSignatureForError (), base_member_type.GetSignatureForError (), base_member.GetSignatureForError ());
 				}
 				ok = false;
+			} else if (!NamedTupleSpec.CheckOverrideName (MemberType, base_member_type)) {
+				// CSC: Should be different error code
+				Report.Error (8139, Location, "`{0}': cannot change return type tuple element names when overriding inherited member `{1}'",
+							  GetSignatureForError (), base_member.GetSignatureForError ());
+				ok = false;
+			}
+
+			var base_params = base_member as IParametersMember;
+			if (base_params != null) {
+				if (!NamedTupleSpec.CheckOverrideName ((IParametersMember)this, base_params)) {
+					Report.Error (8139, Location, "`{0}': cannot change tuple element names when overriding inherited member `{1}'",
+								  GetSignatureForError (), base_member.GetSignatureForError ());
+					ok = false;
+				}
 			}
 
 			return ok;

@@ -1,6 +1,23 @@
 if HOST_WIN32
 win32_sources = \
-	console-win32.c
+	console-win32.c \
+	console-win32-internals.h \
+	cominterop-win32-internals.h \
+	w32file-win32.c \
+	w32file-win32-internals.h \
+	icall-windows.c \
+	icall-windows-internals.h \
+	marshal-windows.c \
+	marshal-windows-internals.h \
+	mono-security-windows.c \
+	mono-security-windows-internals.h \
+	w32mutex-win32.c \
+	w32semaphore-win32.c \
+	w32event-win32.c \
+	w32process-win32.c \
+	w32process-win32-internals.h \
+	w32socket-win32.c \
+	w32error-win32.c
 
 platform_sources = $(win32_sources)
 
@@ -23,19 +40,27 @@ else
 assembliesdir = $(exec_prefix)/lib
 confdir = $(sysconfdir)
 unix_sources = \
-	console-unix.c
+	console-unix.c \
+	w32mutex-unix.c \
+	w32semaphore-unix.c \
+	w32event-unix.c \
+	w32process-unix.c \
+	w32process-unix-internals.h \
+	w32process-unix-osx.c \
+	w32process-unix-bsd.c \
+	w32process-unix-haiku.c \
+	w32process-unix-default.c \
+	w32socket-unix.c \
+	w32file-unix.c \
+	w32file-unix-glob.c \
+	w32file-unix-glob.h \
+	w32error-unix.c
 
 platform_sources = $(unix_sources)
 endif
 
-if PLATFORM_ANDROID
+if HOST_ANDROID
 platform_sources += ../../support/libm/complex.c
-endif
-
-if SHARED_MONO
-if SUPPORT_BOEHM
-bin_PROGRAMS = pedump
-endif
 endif
 
 #
@@ -88,7 +113,7 @@ mono-config-dirs.lo: Makefile
 libmonoruntime_config_la_SOURCES = \
 	mono-config-dirs.h		\
 	mono-config-dirs.c
-libmonoruntime_config_la_CPPFLAGS = $(AM_CPPFLAGS) -DMONO_BINDIR=\"$(bindir)/\" -DMONO_ASSEMBLIES=\"$(assembliesdir)\" -DMONO_CFG_DIR=\"$(confdir)\"
+libmonoruntime_config_la_CPPFLAGS = $(AM_CPPFLAGS) -DMONO_BINDIR=\"$(bindir)/\" -DMONO_ASSEMBLIES=\"$(assembliesdir)\" -DMONO_CFG_DIR=\"$(confdir)\" -DMONO_RELOC_LIBDIR=\"../$(reloc_libdir)\"
 
 CLEANFILES = mono-bundle.stamp
 
@@ -96,21 +121,30 @@ null_sources = \
 	console-null.c
 
 null_gc_sources = \
-	null-gc.c
+	null-gc.c \
+	null-gc-handles.h \
+	null-gc-handles.c
 
 common_sources = \
 	$(platform_sources)	\
+	appdomain.c	\
+	domain.c	\
+	appdomain-icalls.h	\
 	assembly.c		\
+	assembly-internals.h	\
 	attach.h		\
 	attach.c		\
 	cil-coff.h		\
 	class.c			\
 	class-internals.h	\
+	class-inlines.h		\
+	class-accessors.c	\
 	cominterop.c		\
 	cominterop.h		\
 	console-io.h		\
 	coree.c 		\
 	coree.h 		\
+	coree-internals.h \
 	culture-info.h  	\
 	culture-info-tables.h	\
 	debug-helpers.c		\
@@ -125,14 +159,18 @@ common_sources = \
 	environment.h		\
 	exception.c		\
 	exception.h		\
-	file-io.c		\
-	file-io.h		\
+	exception-internals.h	\
+	w32file.c		\
+	w32file.h		\
+	w32file-internals.h \
 	filewatcher.c		\
 	filewatcher.h		\
-	gc-internal.h		\
+	gc-internals.h		\
 	icall.c			\
+	icall-internals.h \
 	icall-def.h		\
 	image.c			\
+	image-internals.h	\
 	jit-info.c		\
 	loader.c		\
 	locales.c		\
@@ -141,6 +179,7 @@ common_sources = \
 	lock-tracer.h		\
 	marshal.c		\
 	marshal.h		\
+	marshal-internals.h \
 	mempool.c		\
 	mempool.h		\
 	mempool-internals.h	\
@@ -154,10 +193,13 @@ common_sources = \
 	mono-config.c		\
 	mono-debug.h		\
 	mono-debug.c		\
-	mono-debug-debugger.h	\
+	debug-internals.h	\
 	mono-endian.c		\
 	mono-endian.h		\
+	mono-hash.c		\
 	mono-hash.h		\
+	mono-conc-hash.c		\
+	mono-conc-hash.h		\
 	mono-mlist.c		\
 	mono-mlist.h		\
 	mono-perfcounters.c	\
@@ -167,17 +209,21 @@ common_sources = \
 	mono-route.c		\
 	mono-route.h		\
 	monitor.h		\
-	nacl-stub.c		\
 	normalization-tables.h	\
 	number-formatter.h	\
 	number-ms.c		\
 	number-ms.h		\
+	object.c	\
 	object-internals.h	\
 	opcodes.c		\
-	socket-io.c		\
-	socket-io.h		\
-	process.c		\
-	process.h		\
+	property-bag.h	\
+	property-bag.c	\
+	w32socket.c		\
+	w32socket.h		\
+	w32socket-internals.h		\
+	w32process.c		\
+	w32process.h		\
+	w32process-internals.h		\
 	profiler.c		\
 	profiler-private.h	\
 	rand.h			\
@@ -198,13 +244,21 @@ common_sources = \
 	tabledefs.h 		\
 	threads.c		\
 	threads-types.h		\
-	threadpool-ms.c	\
-	threadpool-ms.h	\
-	threadpool-ms-io.c	\
-	threadpool-ms-io.h	\
+	threadpool.c	\
+	threadpool.h	\
+	threadpool-worker-default.c	\
+	threadpool-worker.h	\
+	threadpool-io.c	\
+	threadpool-io.h	\
 	verify.c		\
 	verify-internals.h	\
 	wrapper-types.h	\
+	dynamic-image-internals.h	\
+	dynamic-stream.c	\
+	dynamic-stream-internals.h	\
+	reflection-cache.h	\
+	custom-attrs-internals.h	\
+	sre-internals.h	\
 	reflection-internals.h	\
 	file-mmap-posix.c	\
 	file-mmap-windows.c	\
@@ -213,31 +267,41 @@ common_sources = \
 	abi-details.h	\
 	metadata-cross-helpers.c	\
 	seq-points-data.h	\
-	seq-points-data.c
-
+	seq-points-data.c	\
+	handle.c	\
+	handle.h	\
+	w32mutex.h	\
+	w32semaphore.h	\
+	w32event.h	\
+	w32handle-namespace.h	\
+	w32handle-namespace.c	\
+	w32handle.h	\
+	w32handle.c	\
+	w32error.h	\
+	reflection.c	\
+	dynamic-image.c	\
+	sre.c	\
+	sre-encode.c	\
+	sre-save.c	\
+	custom-attrs.c	\
+	fdhandle.h	\
+	fdhandle.c	\
+	callspec.h	\
+	callspec.c
 
 # These source files have compile time dependencies on GC code
 gc_dependent_sources = \
-	appdomain.c	\
-	domain.c	\
 	gc-stats.c	\
 	gc.c		\
-	monitor.c	\
-	mono-hash.c	\
-	object.c	\
-	reflection.c
+	monitor.c
 
 boehm_sources = \
 	boehm-gc.c
 
 sgen_sources = \
-	sgen-os-posix.c		\
-	sgen-os-mach.c		\
-	sgen-os-win32.c		\
-	sgen-os-coop.c		\
 	sgen-bridge.c		\
 	sgen-bridge.h		\
-	sgen-bridge-internal.h	\
+	sgen-bridge-internals.h	\
 	sgen-old-bridge.c		\
 	sgen-new-bridge.c		\
 	sgen-tarjan-bridge.c		\
@@ -258,12 +322,12 @@ libmonoruntimesgen_la_LIBADD = libmonoruntime-config.la
 libmonoruntime_static_la_SOURCES = $(libmonoruntime_la_SOURCES)
 libmonoruntime_static_la_LDFLAGS = -static
 libmonoruntime_static_la_CFLAGS = $(BOEHM_DEFINES)
-libmonoruntime_static_la_LIBADD = $(bundle_obj) $(libmonoruntime_la_LIBADD)
+libmonoruntime_static_la_LIBADD = $(bundle_obj) libmonoruntime-config.la
 
 libmonoruntimesgen_static_la_SOURCES = $(libmonoruntimesgen_la_SOURCES)
 libmonoruntimesgen_static_la_LDFLAGS = -static
 libmonoruntimesgen_static_la_CFLAGS = $(SGEN_DEFINES)
-libmonoruntimesgen_static_la_LIBADD = $(libmonoruntimesgen_la_LIBADD)
+libmonoruntimesgen_static_la_LIBADD = libmonoruntime-config.la
 
 libmonoruntimeincludedir = $(includedir)/mono-$(API_VER)/mono/metadata
 
@@ -288,36 +352,11 @@ libmonoruntimeinclude_HEADERS = \
 	object.h		\
 	opcodes.h		\
 	profiler.h		\
+	profiler-events.h	\
 	reflection.h		\
 	row-indexes.h		\
 	tokentype.h		\
 	verify.h		
 
-if DTRACE_G_REQUIRED
-
-PEDUMP_DTRACE_OBJECT = pedump-dtrace.$(OBJEXT)
-
-pedump-dtrace.$(OBJEXT): $(top_srcdir)/data/mono.d libmonoruntime.la ../io-layer/libwapi.la ../utils/libmonoutils.la
-	DTRACE="$(DTRACE)" DTRACEFLAGS="$(DTRACEFLAGS)" AR="$(AR)" $(SHELL) $(top_srcdir)/data/dtrace-prelink.sh \
-	--pic pedump-dtrace.$(OBJEXT) $(top_srcdir)/data/mono.d libmonoruntime.la ../io-layer/libwapi.la ../utils/libmonoutils.la
-
-else
-PEDUMP_DTRACE_OBJECT = 
-endif
-
-if SHARED_MONO
-if SUPPORT_BOEHM
-pedump_SOURCES =		\
-	pedump.c
-
-pedump_LDADD = libmonoruntime.la ../io-layer/libwapi.la ../utils/libmonoutils.la \
-	$(LIBGC_LIBS) $(GLIB_LIBS) -lm $(LIBICONV) $(PEDUMP_DTRACE_OBJECT)
-
-if PLATFORM_DARWIN
-pedump_LDFLAGS=-framework CoreFoundation -framework Foundation
-endif
-endif
-endif
-
 EXTRA_DIST = $(win32_sources) $(unix_sources) $(null_sources) runtime.h \
-		threadpool-ms-io-poll.c threadpool-ms-io-epoll.c threadpool-ms-io-kqueue.c
+		threadpool-io-poll.c threadpool-io-epoll.c threadpool-io-kqueue.c sgen-dynarray.h

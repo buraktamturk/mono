@@ -62,18 +62,22 @@ namespace System.Reflection.Emit {
 		private FieldBuilder[] global_fields;
 		bool is_main;
 		private MonoResource[] resources;
+		private IntPtr unparented_classes;
 		#endregion
 #pragma warning restore 169, 414
 		
 		private TypeBuilder global_type;
 		private Type global_type_created;
-		Hashtable name_cache;
+		// name_cache keys are display names
+		Dictionary<TypeName, TypeBuilder> name_cache;
 		Dictionary<string, int> us_string_cache;
 		private int[] table_indexes;
 		bool transient;
 		ModuleBuilderTokenGenerator token_gen;
 		Hashtable resource_writers;
 		ISymbolWriter symbolWriter;
+
+		static bool has_warned_about_symbolWriter;
 
 		[MethodImplAttribute(MethodImplOptions.InternalCall)]
 		private static extern void basic_init (ModuleBuilder ab);
@@ -90,7 +94,7 @@ namespace System.Reflection.Emit {
 			guid = Guid.FastNewGuidArray ();
 			// guid = Guid.NewGuid().ToByteArray ();
 			table_idx = get_next_table_index (this, 0x00, true);
-			name_cache = new Hashtable ();
+			name_cache = new Dictionary<TypeName, TypeBuilder> ();
 			us_string_cache = new Dictionary<string, int> (512);
 
 			basic_init (this);
@@ -105,16 +109,36 @@ namespace System.Reflection.Emit {
 
 			if (emitSymbolInfo) {
 				Assembly asm = Assembly.LoadWithPartialName ("Mono.CompilerServices.SymbolWriter");
-				if (asm == null)
-					throw new TypeLoadException ("The assembly for default symbol writer cannot be loaded");
 
-				Type t = asm.GetType ("Mono.CompilerServices.SymbolWriter.SymbolWriterImpl", true);
-				symbolWriter = (ISymbolWriter) Activator.CreateInstance (t, new object[] { this });
+				Type t = null;
+				if (asm != null)
+					t = asm.GetType ("Mono.CompilerServices.SymbolWriter.SymbolWriterImpl");
+
+				if (t == null) {
+					WarnAboutSymbolWriter ("Failed to load the default Mono.CompilerServices.SymbolWriter assembly");
+				} else {
+					try {
+						symbolWriter = (ISymbolWriter) Activator.CreateInstance (t, new object[] { this });
+					} catch (System.MissingMethodException) {
+						WarnAboutSymbolWriter ("The default Mono.CompilerServices.SymbolWriter is not available on this platform");					
+						return;
+					}
+				}
+				
 				string fileName = fqname;
 				if (assemblyb.AssemblyDir != null)
 					fileName = Path.Combine (assemblyb.AssemblyDir, fileName);
 				symbolWriter.Initialize (IntPtr.Zero, fileName, true);
 			}
+		}
+
+		static void WarnAboutSymbolWriter (string message) 
+		{
+			if (has_warned_about_symbolWriter)
+				return;
+
+			has_warned_about_symbolWriter = true;
+			Console.Error.WriteLine ("WARNING: {0}", message);
 		}
 
 		public override string FullyQualifiedName {get { return fqname;}}
@@ -135,8 +159,8 @@ namespace System.Reflection.Emit {
 			if (data == null)
 				throw new ArgumentNullException ("data");
 
-			FieldBuilder fb = DefineUninitializedData (name, data.Length, 
-													   attributes | FieldAttributes.HasFieldRVA);
+			var maskedAttributes = attributes & ~FieldAttributes.ReservedMask;
+			FieldBuilder fb = DefineDataImpl (name, data.Length, maskedAttributes | FieldAttributes.HasFieldRVA);
 			fb.SetRVAData (data);
 
 			return fb;
@@ -144,12 +168,19 @@ namespace System.Reflection.Emit {
 
 		public FieldBuilder DefineUninitializedData (string name, int size, FieldAttributes attributes)
 		{
+			return DefineDataImpl (name, size, attributes & ~FieldAttributes.ReservedMask);
+		}
+
+		private FieldBuilder DefineDataImpl (string name, int size, FieldAttributes attributes)
+		{
 			if (name == null)
 				throw new ArgumentNullException ("name");
+			if (name == String.Empty)
+				throw new ArgumentException ("name cannot be empty", "name");
 			if (global_type_created != null)
 				throw new InvalidOperationException ("global fields already created");
-			if ((size <= 0) || (size > 0x3f0000))
-				throw new ArgumentException ("size", "Data size must be > 0 and < 0x3f0000");
+			if ((size <= 0) || (size >= 0x3f0000))
+				throw new ArgumentException ("Data size must be > 0 and < 0x3f0000", null as string);
 
 			CreateGlobalType ();
 
@@ -262,24 +293,27 @@ namespace System.Reflection.Emit {
 		private TypeBuilder DefineType (string name, TypeAttributes attr, Type parent, Type[] interfaces, PackingSize packingSize, int typesize) {
 			if (name == null)
 				throw new ArgumentNullException ("fullname");
-			if (name_cache.ContainsKey (name))
+			TypeIdentifier ident = TypeIdentifiers.FromInternal (name);
+			if (name_cache.ContainsKey (ident))
 				throw new ArgumentException ("Duplicate type name within an assembly.");
 			TypeBuilder res = new TypeBuilder (this, name, attr, parent, interfaces, packingSize, typesize, null);
 			AddType (res);
 
-			name_cache.Add (name, res);
+			name_cache.Add (ident, res);
 			
 			return res;
 		}
 
-		internal void RegisterTypeName (TypeBuilder tb, string name)
+		internal void RegisterTypeName (TypeBuilder tb, TypeName name)
 		{
 			name_cache.Add (name, tb);
 		}
 		
-		internal TypeBuilder GetRegisteredType (string name)
+		internal TypeBuilder GetRegisteredType (TypeName name)
 		{
-			return (TypeBuilder) name_cache [name];
+			TypeBuilder result = null;
+			name_cache.TryGetValue (name, out result);
+			return result;
 		}
 
 		[ComVisible (true)]
@@ -304,13 +338,14 @@ namespace System.Reflection.Emit {
 		}
 
 		public EnumBuilder DefineEnum( string name, TypeAttributes visibility, Type underlyingType) {
-			if (name_cache.Contains (name))
+			TypeIdentifier ident = TypeIdentifiers.FromInternal (name);
+			if (name_cache.ContainsKey (ident))
 				throw new ArgumentException ("Duplicate type name within an assembly.");
 
 			EnumBuilder eb = new EnumBuilder (this, name, visibility, underlyingType);
 			TypeBuilder res = eb.GetTypeBuilder ();
 			AddType (res);
-			name_cache.Add (name, res);
+			name_cache.Add (ident, res);
 			return eb;
 		}
 
@@ -324,48 +359,36 @@ namespace System.Reflection.Emit {
 			return GetType (className, false, ignoreCase);
 		}
 
-		private TypeBuilder search_in_array (TypeBuilder[] arr, int validElementsInArray, string className) {
+		private TypeBuilder search_in_array (TypeBuilder[] arr, int validElementsInArray, TypeName className) {
 			int i;
 			for (i = 0; i < validElementsInArray; ++i) {
-				if (String.Compare (className, arr [i].FullName, true, CultureInfo.InvariantCulture) == 0) {
+				if (String.Compare (className.DisplayName, arr [i].FullName, true, CultureInfo.InvariantCulture) == 0) {
 					return arr [i];
 				}
 			}
 			return null;
 		}
 
-		private TypeBuilder search_nested_in_array (TypeBuilder[] arr, int validElementsInArray, string className) {
+		private TypeBuilder search_nested_in_array (TypeBuilder[] arr, int validElementsInArray, TypeName className) {
 			int i;
 			for (i = 0; i < validElementsInArray; ++i) {
-				if (String.Compare (className, arr [i].Name, true, CultureInfo.InvariantCulture) == 0)
+				if (String.Compare (className.DisplayName, arr [i].Name, true, CultureInfo.InvariantCulture) == 0)
 					return arr [i];
 			}
 			return null;
 		}
 
-		[MethodImplAttribute(MethodImplOptions.InternalCall)]
-		private static extern Type create_modified_type (TypeBuilder tb, string modifiers);
+		private TypeBuilder GetMaybeNested (TypeBuilder t, IEnumerable<TypeName> nested) {
+			TypeBuilder result = t;
 
-		static readonly char [] type_modifiers = {'&', '[', '*'};
-
-		private TypeBuilder GetMaybeNested (TypeBuilder t, string className) {
-			int subt;
-			string pname, rname;
-
-			subt = className.IndexOf ('+');
-			if (subt < 0) {
-				if (t.subtypes != null)
-					return search_nested_in_array (t.subtypes, t.subtypes.Length, className);
-				return null;
+			foreach (TypeName pname in nested) {
+				if (result.subtypes == null)
+					return null;
+				result = search_nested_in_array(result.subtypes, result.subtypes.Length, pname);
+				if (result == null)
+					return null;
 			}
-			if (t.subtypes != null) {
-				pname = className.Substring (0, subt);
-				rname = className.Substring (subt + 1);
-				TypeBuilder result = search_nested_in_array (t.subtypes, t.subtypes.Length, pname);
-				if (result != null)
-					return GetMaybeNested (result, rname);
-			}
-			return null;
+			return result;
 		}
 
 		[ComVisible (true)]
@@ -376,41 +399,47 @@ namespace System.Reflection.Emit {
 			if (className.Length == 0)
 				throw new ArgumentException ("className");
 
-			int subt;
-			string orig = className;
-			string modifiers;
 			TypeBuilder result = null;
 
 			if (types == null && throwOnError)
 				throw new TypeLoadException (className);
 
-			subt = className.IndexOfAny (type_modifiers);
-			if (subt >= 0) {
-				modifiers = className.Substring (subt);
-				className = className.Substring (0, subt);
-			} else
-				modifiers = null;
+			TypeSpec ts = TypeSpec.Parse (className);
 
 			if (!ignoreCase) {
-				result =  name_cache [className] as TypeBuilder;
+				var displayNestedName = ts.TypeNameWithoutModifiers();
+				name_cache.TryGetValue (displayNestedName, out result);
 			} else {
-				subt = className.IndexOf ('+');
-				if (subt < 0) {
-					if (types != null)
-						result = search_in_array (types, num_types,  className);
-				} else {
-					string pname, rname;
-					pname = className.Substring (0, subt);
-					rname = className.Substring (subt + 1);
-					result = search_in_array (types, num_types, pname);
-					if (result != null)
-						result = GetMaybeNested (result, rname);
+				if (types != null)
+					result = search_in_array (types, num_types,  ts.Name);
+				if (!ts.IsNested && result != null) {
+					result = GetMaybeNested (result, ts.Nested);
 				}
 			}
 			if ((result == null) && throwOnError)
-				throw new TypeLoadException (orig);
-			if (result != null && (modifiers != null)) {
-				Type mt = create_modified_type (result, modifiers);
+				throw new TypeLoadException (className);
+			if (result != null && (ts.HasModifiers || ts.IsByRef)) {
+				Type mt = result;
+				if (result is TypeBuilder) {
+					var tb = result as TypeBuilder;
+					if (tb.is_created)
+						mt = tb.CreateType ();
+				}
+				foreach (var mod in ts.Modifiers) {
+					if (mod is PointerSpec)
+						mt = mt.MakePointerType ();
+					else if (mod is ArraySpec) {
+						var spec = mod as ArraySpec;
+						if (spec.IsBound)
+							return null;
+						if (spec.Rank == 1)
+							mt = mt.MakeArrayType ();
+						else
+							mt = mt.MakeArrayType (spec.Rank);
+					}
+				}
+				if (ts.IsByRef)
+					mt = mt.MakeByRefType ();
 				result = mt as TypeBuilder;
 				if (result == null)
 					return mt;
@@ -682,15 +711,97 @@ namespace System.Reflection.Emit {
 			return result;
 		}
 
+		static int typeref_tokengen =  0x01ffffff;
+		static int typedef_tokengen =  0x02ffffff;
+		static int typespec_tokengen =  0x1bffffff;
+		static int memberref_tokengen =  0x0affffff;
+		static int methoddef_tokengen =  0x06ffffff;
+		Dictionary<MemberInfo, int> inst_tokens, inst_tokens_open;
+
+		//
+		// Assign a pseudo token to the various TypeBuilderInst objects, so the runtime
+		// doesn't have to deal with them.
+		// For Save assemblies, the tokens will be fixed up later during Save ().
+		// For Run assemblies, the tokens will not be fixed up, so the runtime will
+		// still encounter these objects, it will resolve them by calling their
+		// RuntimeResolve () methods.
+		//
+		int GetPseudoToken (MemberInfo member, bool create_open_instance)
+		{
+			int token;
+			var dict = create_open_instance ? inst_tokens_open : inst_tokens;
+			if (dict == null) {
+				dict = new Dictionary<MemberInfo, int> (ReferenceEqualityComparer<MemberInfo>.Instance);
+				if (create_open_instance)
+					inst_tokens_open = dict;
+				else
+					inst_tokens = dict;
+			} else if (dict.TryGetValue (member, out token)) {
+				return token;
+			}
+
+			// Count backwards to avoid collisions with the tokens
+			// allocated by the runtime
+			if (member is TypeBuilderInstantiation || member is SymbolType)
+				token = typespec_tokengen --;
+			else if (member is FieldOnTypeBuilderInst)
+				token = memberref_tokengen --;
+			else if (member is ConstructorOnTypeBuilderInst)
+				token = memberref_tokengen --;
+			else if (member is MethodOnTypeBuilderInst)
+				token = memberref_tokengen --;
+			else if (member is FieldBuilder)
+				token = memberref_tokengen --;
+			else if (member is TypeBuilder) {
+				if (create_open_instance && (member as TypeBuilder).ContainsGenericParameters)
+					token = typespec_tokengen --;
+				else if (member.Module == this)
+					token = typedef_tokengen --;
+				else
+					token = typeref_tokengen --;
+			} else if (member is EnumBuilder) {
+				token = GetPseudoToken ((member as  EnumBuilder).GetTypeBuilder(), create_open_instance);
+				dict[member] = token;
+				// n.b. don't register with the runtime, the TypeBuilder already did it.
+				return token;
+			} else if (member is ConstructorBuilder) {
+				if (member.Module == this && !(member as ConstructorBuilder).TypeBuilder.ContainsGenericParameters)
+					token = methoddef_tokengen --;
+				else
+					token = memberref_tokengen --;
+			} else if (member is MethodBuilder) {
+				var mb = member as MethodBuilder;
+				if (member.Module == this && !mb.TypeBuilder.ContainsGenericParameters && !mb.IsGenericMethodDefinition)
+					token = methoddef_tokengen --;
+				else
+					token = memberref_tokengen --;
+			} else if (member is GenericTypeParameterBuilder) {
+				token = typespec_tokengen --;
+			} else
+				throw new NotImplementedException ();
+
+			dict [member] = token;
+			RegisterToken (member, token);
+			return token;
+		}
+
 		internal int GetToken (MemberInfo member) {
+			if (member is ConstructorBuilder || member is MethodBuilder)
+				return GetPseudoToken (member, false);
 			return getToken (this, member, true);
 		}
 
 		internal int GetToken (MemberInfo member, bool create_open_instance) {
+			if (member is TypeBuilderInstantiation || member is FieldOnTypeBuilderInst || member is ConstructorOnTypeBuilderInst || member is MethodOnTypeBuilderInst || member is SymbolType || member is FieldBuilder || member is TypeBuilder || member is ConstructorBuilder || member is MethodBuilder || member is GenericTypeParameterBuilder ||
+			    member is EnumBuilder)
+				return GetPseudoToken (member, create_open_instance);
 			return getToken (this, member, create_open_instance);
 		}
 
 		internal int GetToken (MethodBase method, IEnumerable<Type> opt_param_types) {
+			if (method is ConstructorBuilder || method is MethodBuilder)
+				return GetPseudoToken (method, false);
+
 			if (opt_param_types == null)
 				return getToken (this, method, true);
 
@@ -699,6 +810,8 @@ namespace System.Reflection.Emit {
 		}
 		
 		internal int GetToken (MethodBase method, Type[] opt_param_types) {
+			if (method is ConstructorBuilder || method is MethodBuilder)
+				return GetPseudoToken (method, false);
 			return getMethodToken (this, method, opt_param_types);
 		}
 
@@ -725,11 +838,92 @@ namespace System.Reflection.Emit {
 			return token_gen;
 		}
 
+		// Called from the runtime to return the corresponding finished reflection object
+		internal static object RuntimeResolve (object obj) {
+			if (obj is MethodBuilder)
+				return (obj as MethodBuilder).RuntimeResolve ();
+			if (obj is ConstructorBuilder)
+				return (obj as ConstructorBuilder).RuntimeResolve ();
+			if (obj is FieldBuilder)
+				return (obj as FieldBuilder).RuntimeResolve ();
+			if (obj is GenericTypeParameterBuilder)
+				return (obj as GenericTypeParameterBuilder).RuntimeResolve ();
+			if (obj is FieldOnTypeBuilderInst)
+				return (obj as FieldOnTypeBuilderInst).RuntimeResolve ();
+			if (obj is MethodOnTypeBuilderInst)
+				return (obj as MethodOnTypeBuilderInst).RuntimeResolve ();
+			if (obj is ConstructorOnTypeBuilderInst)
+				return (obj as ConstructorOnTypeBuilderInst).RuntimeResolve ();
+			if (obj is Type)
+				return (obj as Type).RuntimeResolve ();
+			throw new NotImplementedException (obj.GetType ().FullName);
+		}
+
 		[MethodImplAttribute(MethodImplOptions.InternalCall)]
 		private static extern void build_metadata (ModuleBuilder mb);
 
 		[MethodImplAttribute(MethodImplOptions.InternalCall)]
 		private extern void WriteToFile (IntPtr handle);
+
+		void FixupTokens (Dictionary<int, int> token_map, Dictionary<int, MemberInfo> member_map, Dictionary<MemberInfo, int> inst_tokens,
+						  bool open) {
+			foreach (var v in inst_tokens) {
+				var member = v.Key;
+				var old_token = v.Value;
+				MemberInfo finished = null;
+
+				// Construct the concrete reflection object corresponding to the
+				// TypeBuilderInst object, and request a token for it instead.
+				if (member is TypeBuilderInstantiation || member is SymbolType) {
+					finished = (member as Type).RuntimeResolve ();
+				} else if (member is FieldOnTypeBuilderInst) {
+					finished = (member as FieldOnTypeBuilderInst).RuntimeResolve ();
+				} else if (member is ConstructorOnTypeBuilderInst) {
+					finished = (member as ConstructorOnTypeBuilderInst).RuntimeResolve ();
+				} else if (member is MethodOnTypeBuilderInst) {
+					finished = (member as MethodOnTypeBuilderInst).RuntimeResolve ();
+				} else if (member is FieldBuilder) {
+					finished = (member as FieldBuilder).RuntimeResolve ();
+				} else if (member is TypeBuilder) {
+					finished = (member as TypeBuilder).RuntimeResolve ();
+				} else if (member is EnumBuilder) {
+					finished = (member as EnumBuilder).RuntimeResolve ();
+				} else if (member is ConstructorBuilder) {
+					finished = (member as ConstructorBuilder).RuntimeResolve ();
+				} else if (member is MethodBuilder) {
+					finished = (member as MethodBuilder).RuntimeResolve ();
+				} else if (member is GenericTypeParameterBuilder) {
+					finished = (member as GenericTypeParameterBuilder).RuntimeResolve ();
+				} else {
+					throw new NotImplementedException ();
+				}
+
+				int new_token = GetToken (finished, open);
+				token_map [old_token] = new_token;
+				member_map [old_token] = finished;
+				// Replace the token mapping in the runtime so it points to the new object
+				RegisterToken (finished, old_token);
+			}
+		}
+
+		//
+		// Fixup the pseudo tokens assigned to the various SRE objects
+		//
+		void FixupTokens ()
+		{
+			var token_map = new Dictionary<int, int> ();
+			var member_map = new Dictionary<int, MemberInfo> ();
+			if (inst_tokens != null)
+				FixupTokens (token_map, member_map, inst_tokens, false);
+			if (inst_tokens_open != null)
+				FixupTokens (token_map, member_map, inst_tokens_open, true);
+
+			// Replace the tokens in the IL stream
+			if (types != null) {
+				for (int i = 0; i < num_types; ++i)
+					types [i].FixupTokens (token_map, member_map);
+			}
+		}
 
 		internal void Save ()
 		{
@@ -741,6 +935,8 @@ namespace System.Reflection.Emit {
 					if (!types [i].is_created)
 						throw new NotSupportedException ("Type '" + types [i].FullName + "' was not completed.");
 			}
+
+			FixupTokens ();
 
 			if ((global_type != null) && (global_type_created == null))
 				global_type_created = global_type.CreateType ();

@@ -39,86 +39,131 @@ namespace System.Net.Sockets
 	public class SocketAsyncEventArgs : EventArgs, IDisposable
 	{
 		bool disposed;
-		int in_progress;
-		internal SocketAsyncWorker Worker;
-		EndPoint remote_ep;
-		public Exception ConnectByNameError { get; internal set; }
 
-		public event EventHandler<SocketAsyncEventArgs> Completed;
+		internal volatile int in_progress;
+		internal EndPoint remote_ep;
+		internal Socket current_socket;
 
-		IList <ArraySegment <byte>> _bufferList;
-		
-		public Socket AcceptSocket { get; set; }
-		public byte[] Buffer { get; private set; }
+		internal SocketAsyncResult socket_async_result = new SocketAsyncResult ();
 
+		public Exception ConnectByNameError {
+			get;
+			internal set;
+		}
+
+		public Socket AcceptSocket {
+			get;
+			set;
+		}
+
+		public byte[] Buffer {
+			get;
+			private set;
+		}
+
+		internal IList<ArraySegment<byte>> m_BufferList;
 		public IList<ArraySegment<byte>> BufferList {
-			get { return _bufferList; }
+			get { return m_BufferList; }
 			set {
 				if (Buffer != null && value != null)
 					throw new ArgumentException ("Buffer and BufferList properties cannot both be non-null.");
-				_bufferList = value;
+				m_BufferList = value;
 			}
 		}
 
-		public int BytesTransferred { get; internal set; }
-		public int Count { get; internal set; }
-		public bool DisconnectReuseSocket { get; set; }
-		public SocketAsyncOperation LastOperation { get; private set; }
-		public int Offset { get; private set; }
+		public int BytesTransferred {
+			get;
+			internal set;
+		}
+
+		public int Count {
+			get;
+			internal set;
+		}
+
+		public bool DisconnectReuseSocket {
+			get;
+			set;
+		}
+
+		public SocketAsyncOperation LastOperation {
+			get;
+			private set;
+		}
+
+		public int Offset {
+			get;
+			private set;
+		}
+
 		public EndPoint RemoteEndPoint {
 			get { return remote_ep; }
 			set { remote_ep = value; }
 		}
-#if !NET_2_1
-		public IPPacketInformation ReceiveMessageFromPacketInfo { get; private set; }
-		public SendPacketsElement[] SendPacketsElements { get; set; }
-		public TransmitFileOptions SendPacketsFlags { get; set; }
-#endif
+
+		public IPPacketInformation ReceiveMessageFromPacketInfo {
+			get;
+			private set;
+		}
+
+		public SendPacketsElement[] SendPacketsElements {
+			get;
+			set;
+		}
+
+		public TransmitFileOptions SendPacketsFlags {
+			get;
+			set;
+		}
+
 		[MonoTODO ("unused property")]
-		public int SendPacketsSendSize { get; set; }
-		public SocketError SocketError { get; set; }
-		public SocketFlags SocketFlags { get; set; }
-		public object UserToken { get; set; }
-		internal Socket curSocket;
+		public int SendPacketsSendSize {
+			get;
+			set;
+		}
+
+		public SocketError SocketError {
+			get;
+			set;
+		}
+
+		public SocketFlags SocketFlags {
+			get;
+			set;
+		}
+
+		public object UserToken {
+			get;
+			set;
+		}
+
 		public Socket ConnectSocket {
 			get {
 				switch (SocketError) {
 				case SocketError.AccessDenied:
 					return null;
 				default:
-					return curSocket;
+					return current_socket;
 				}
 			}
 		}
 
-		internal bool PolicyRestricted { get; private set; }
+		internal bool PolicyRestricted {
+			get;
+			private set;
+		}
 
-		internal SocketAsyncEventArgs (bool policy) : 
-			this ()
+		public event EventHandler<SocketAsyncEventArgs> Completed;
+
+		internal SocketAsyncEventArgs (bool policy)
+			: this ()
 		{
 			PolicyRestricted = policy;
 		}
-		
+
 		public SocketAsyncEventArgs ()
 		{
-			Worker = new SocketAsyncWorker (this);
-			AcceptSocket = null;
-			Buffer = null;
-			BufferList = null;
-			BytesTransferred = 0;
-			Count = 0;
-			DisconnectReuseSocket = false;
-			LastOperation = SocketAsyncOperation.None;
-			Offset = 0;
-			RemoteEndPoint = null;
-#if !NET_2_1
-			SendPacketsElements = null;
-			SendPacketsFlags = TransmitFileOptions.UseDefaultWorkerThread;
-#endif
 			SendPacketsSendSize = -1;
-			SocketError = SocketError.Success;
-			SocketFlags = SocketFlags.None;
-			UserToken = null;
 		}
 
 		~SocketAsyncEventArgs ()
@@ -130,23 +175,9 @@ namespace System.Net.Sockets
 		{
 			disposed = true;
 
-			if (disposing) {
-				if (disposed || Interlocked.CompareExchange (ref in_progress, 0, 0) != 0)
-					return;
-				if (Worker != null) {
-					Worker.Dispose ();
-					Worker = null;
-				}
-			}
-			AcceptSocket = null;
-			Buffer = null;
-			BufferList = null;
-			RemoteEndPoint = null;
-			UserToken = null;
-#if !NET_2_1
-			SendPacketsElements = null;
-#endif
-		}		
+			if (disposing && in_progress != 0)
+				return;
+		}
 
 		public void Dispose ()
 		{
@@ -160,7 +191,13 @@ namespace System.Net.Sockets
 				throw new ObjectDisposedException ("System.Net.Sockets.SocketAsyncEventArgs");
 			if (Interlocked.Exchange (ref in_progress, 1) != 0)
 				throw new InvalidOperationException ("Operation already in progress");
+
 			LastOperation = op;
+		}
+
+		internal void Complete ()
+		{
+			OnCompleted (this);
 		}
 
 		protected virtual void OnCompleted (SocketAsyncEventArgs e)
@@ -170,20 +207,15 @@ namespace System.Net.Sockets
 			
 			EventHandler<SocketAsyncEventArgs> handler = e.Completed;
 			if (handler != null)
-				handler (e.curSocket, e);
+				handler (e.current_socket, e);
 		}
 
 		public void SetBuffer (int offset, int count)
 		{
-			SetBufferInternal (Buffer, offset, count);
+			SetBuffer (Buffer, offset, count);
 		}
 
 		public void SetBuffer (byte[] buffer, int offset, int count)
-		{
-			SetBufferInternal (buffer, offset, count);
-		}
-
-		void SetBufferInternal (byte[] buffer, int offset, int count)
 		{
 			if (buffer != null) {
 				if (BufferList != null)
@@ -199,145 +231,45 @@ namespace System.Net.Sockets
 				Count = count;
 				Offset = offset;
 			}
+
 			Buffer = buffer;
 		}
 
-#region Internals
-		internal static AsyncCallback Dispatcher = new AsyncCallback (DispatcherCB);
-
-		static void DispatcherCB (IAsyncResult ares)
+		internal void StartOperationCommon (Socket socket)
 		{
-			SocketAsyncEventArgs args = (SocketAsyncEventArgs) ares.AsyncState;
-
-			if (Interlocked.Exchange (ref args.in_progress, 0) != 1)
-				throw new InvalidOperationException ("No operation in progress");
-
-			/* Notes;
-			 *  -SocketOperation.AcceptReceive not used in SocketAsyncEventArgs
-			 *  -SendPackets and ReceiveMessageFrom are not implemented yet */
-			switch (args.LastOperation) {
-			case SocketAsyncOperation.Receive:
-				args.ReceiveCallback (ares);
-				break;
-			case SocketAsyncOperation.Send:
-				args.SendCallback (ares);
-				break;
-			case SocketAsyncOperation.ReceiveFrom:
-				args.ReceiveFromCallback (ares);
-				break;
-			case SocketAsyncOperation.SendTo:
-				args.SendToCallback (ares);
-				break;
-			case SocketAsyncOperation.Accept:
-				args.AcceptCallback (ares);
-				break;
-			case SocketAsyncOperation.Disconnect:
-				args.DisconnectCallback (ares);
-				break;
-			case SocketAsyncOperation.Connect:
-				args.ConnectCallback (ares);
-				break;
-			/*
-			case SocketOperation.ReceiveMessageFrom:
-			case SocketOperation.SendPackets:
-			*/
-			default:
-				throw new NotImplementedException (String.Format ("Operation {0} is not implemented", args.LastOperation));
-			}
+			current_socket = socket;
 		}
 
-		internal void ReceiveCallback (IAsyncResult ares)
+		internal void StartOperationWrapperConnect (MultipleConnectAsync args)
 		{
-			try {
-				BytesTransferred = curSocket.EndReceive (ares);
-			} catch (SocketException se){
-				SocketError = se.SocketErrorCode;
-			} catch (ObjectDisposedException) {
-				SocketError = SocketError.OperationAborted;
-			} finally {
-				OnCompleted (this);
-			}
+			SetLastOperation (SocketAsyncOperation.Connect);
+
+			//m_MultipleConnect = args;
 		}
 
-		void ConnectCallback (IAsyncResult ares)
+		internal void FinishConnectByNameSyncFailure (Exception exception, int bytesTransferred, SocketFlags flags)
 		{
-			try {
-				curSocket.EndConnect (ares);
- 			} catch (SocketException se) {
-				SocketError = se.SocketErrorCode;
-			} catch (ObjectDisposedException) {
-				SocketError = SocketError.OperationAborted;
-			} finally {
-				OnCompleted (this);
-			}
+			throw new NotImplementedException ();
 		}
 
-		internal void SendCallback (IAsyncResult ares)
+		internal void FinishOperationAsyncFailure (Exception exception, int bytesTransferred, SocketFlags flags)
 		{
-			try {
-				BytesTransferred = curSocket.EndSend (ares);
-			} catch (SocketException se){
-				SocketError = se.SocketErrorCode;
-			} catch (ObjectDisposedException) {
-				SocketError = SocketError.OperationAborted;
-			} finally {
-				OnCompleted (this);
-			}
+			throw new NotImplementedException ();
 		}
 
-		internal void AcceptCallback (IAsyncResult ares)
+		internal void FinishWrapperConnectSuccess (Socket connectSocket, int bytesTransferred, SocketFlags flags)
 		{
-			try {
-				AcceptSocket = curSocket.EndAccept (ares);
-			} catch (SocketException ex) {
-				SocketError = ex.SocketErrorCode;
-			} catch (ObjectDisposedException) {
-				SocketError = SocketError.OperationAborted;
-			} finally {
-				if (AcceptSocket == null)
-					AcceptSocket = new Socket (curSocket.AddressFamily, curSocket.SocketType, curSocket.ProtocolType, null);
-				OnCompleted (this);
-			}
+			SetResults(SocketError.Success, bytesTransferred, flags);
+			current_socket = connectSocket;
+
+			OnCompleted (this);
 		}
 
-		internal void DisconnectCallback (IAsyncResult ares)
+		internal void SetResults (SocketError socketError, int bytesTransferred, SocketFlags flags)
 		{
-			try {
-				curSocket.EndDisconnect (ares);
-			} catch (SocketException ex) {
-				SocketError = ex.SocketErrorCode;
-			} catch (ObjectDisposedException) {
-				SocketError = SocketError.OperationAborted;
-			} finally {
-				OnCompleted (this);
-			}
+			SocketError = socketError;
+			BytesTransferred = bytesTransferred;
+			SocketFlags = flags;
 		}
-
-		internal void ReceiveFromCallback (IAsyncResult ares)
-		{
-			try {
-				BytesTransferred = curSocket.EndReceiveFrom (ares, ref remote_ep);
-			} catch (SocketException ex) {
-				SocketError = ex.SocketErrorCode;
-			} catch (ObjectDisposedException) {
-				SocketError = SocketError.OperationAborted;
-			} finally {
-				OnCompleted (this);
-			}
-		}
-
-		internal void SendToCallback (IAsyncResult ares)
-		{
-			try {
-				BytesTransferred = curSocket.EndSendTo (ares);
-			} catch (SocketException ex) {
-				SocketError = ex.SocketErrorCode;
-			} catch (ObjectDisposedException) {
-				SocketError = SocketError.OperationAborted;
-			} finally {
-				OnCompleted (this);
-			}
-		}
-#endregion
 	}
 }

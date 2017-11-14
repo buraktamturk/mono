@@ -11,7 +11,8 @@ SCARY_LIB=/lib:$(prefix)/lib
 endif
 
 LIB_REFS = System System.Xml
-LIB_MCS_FLAGS = $(SCARY_LIB) /unsafe /r:$(corlib)
+KEYFILE = ../ecma.pub
+LIB_MCS_FLAGS = $(SCARY_LIB) /unsafe
 TEST_MCS_FLAGS = $(LIB_MCS_FLAGS)
 
 EXTRA_DISTFILES = \

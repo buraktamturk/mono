@@ -9,7 +9,6 @@ This is a regression test for a crash in the domain object cleaner code that did
 stop-the-world before walking the heap.
 */
 class Driver {
-
 	static void AllocStuff ()
 	{
 		var x = new object ();
@@ -30,14 +29,17 @@ class Driver {
 			t.IsBackground = true;
 			t.Start ();
 		}
-		
-		for (int i = 0; i < 100; ++i) {
-			var ad = AppDomain.CreateDomain ("domain_" + i);
+
+		int iterations = 0;
+
+		for (TestTimeout timeout = TestTimeout.Start(TimeSpan.FromSeconds(TestTimeout.IsStressTest ? 120 : 5)); timeout.HaveTimeLeft;) {
+			var ad = AppDomain.CreateDomain ("domain_" + iterations);
 			ad.DoCallBack (new CrossAppDomainDelegate (AllocStuff));
 			AppDomain.Unload (ad);
+
 			Console.Write (".");
-			if (i > 0 && i % 20 == 0) Console.WriteLine ();
+			if ((++iterations) % 20 == 0) Console.WriteLine ();
 		}
-		Console.WriteLine ("\ndone");
+		Console.WriteLine ($"\ndone {iterations} iterations");
 	}
 }

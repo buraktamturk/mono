@@ -6,18 +6,13 @@ endif
 if DISABLE_EXECUTABLES
 runtime_lib=$(top_builddir)/mono/mini/$(LIBMONO_LA) $(static_libs)
 else
-if !SHARED_MONO
 static_libs=	\
-	$(top_builddir)/mono/metadata/libmonoruntime-static.la	\
-	$(top_builddir)/mono/io-layer/libwapi.la	\
+	$(top_builddir)/mono/metadata/libmonoruntimesgen-static.la	\
 	$(top_builddir)/mono/utils/libmonoutils.la \
 	$(GLIB_LIBS) $(LIBICONV) \
 	$(LIBGC_STATIC_LIBS)
 
 runtime_lib=$(top_builddir)/mono/mini/$(LIBMONO_LA) $(static_libs)
-else
-runtime_lib=$(top_builddir)/mono/mini/$(LIBMONO_LA)
-endif
 endif
 
 if DISABLE_EXECUTABLES
@@ -26,7 +21,7 @@ else
 if DISABLE_LIBRARIES
 bin_PROGRAMS =
 else
-if SUPPORT_BOEHM
+if SUPPORT_SGEN
 bin_PROGRAMS = monograph
 endif
 endif
@@ -43,7 +38,7 @@ monograph_LDADD = \
 	$(LIBICONV)			\
 	-lm
 
-if PLATFORM_DARWIN
+if HOST_DARWIN
 monograph_LDFLAGS=-framework CoreFoundation
 endif
 
@@ -56,5 +51,4 @@ graphs: $(OUT)
 	./monograph -n -o $*.png corlib.dll $*
 	convert -geometry '480x360>' $*.png $*.jpeg
 
-EXTRA_DIST = ChangeLog
 

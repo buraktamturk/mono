@@ -1,5 +1,6 @@
-/*
- * sysmath.c: these are based on bob smith's csharp routines 
+/**
+ * \file
+ * these are based on bob smith's csharp routines 
  *
  * Author:
  *	Mono Project (http://www.mono-project.com)
@@ -8,6 +9,7 @@
  * Copyright 2001-2003 Ximian, Inc (http://www.ximian.com)
  * Copyright 2004-2009 Novell, Inc (http://www.novell.com)
  * Copyright 2015 Xamarin, Inc (https://www.xamarin.com)
+ * Licensed under the MIT license. See LICENSE file in the project root for full license information.
  */
 
 //
@@ -262,6 +264,22 @@ ves_icall_System_Math_Pow (gdouble x, gdouble y)
 	 */
 	if (result == MInfinity.d && x < 0.0 && isfinite (x) && ceil (y / 2) == floor (y / 2))
 		result = PInfinity.d;
+
+#if defined (__linux__) && SIZEOF_VOID_P == 4
+	/* On Linux 32bits, some tests erroneously return NaN */
+	if (isnan (result)) {
+		if (isminusone (x) && (y > 9007199254740991.0 || y < -9007199254740991.0)) {
+			/* Math.Pow (-1, Double.MaxValue) and Math.Pow (-1, Double.MinValue) should return 1 */
+			result = POne.d;
+		} else if (x < -9007199254740991.0 && y < -9007199254740991.0) {
+			/* Math.Pow (Double.MinValue, Double.MinValue) should return 0 */
+			result = 0.0;
+		} else if (x < -9007199254740991.0 && y > 9007199254740991.0) {
+			/* Math.Pow (Double.MinValue, Double.MaxValue) should return Double.PositiveInfinity */
+			result = PInfinity.d;
+		}
+	}
+#endif
 
 	return result == -0.0 ? 0 : result;
 }
